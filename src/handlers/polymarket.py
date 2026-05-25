@@ -1,15 +1,15 @@
 from pprint import pprint
 from urllib.parse import urljoin
-from src.utils.utils import sendRequest_Sync, sendRequest_Async, makeEmptyJSONLFile, appendToJSONL, readJSONL
+from src.utils.utils import sendRequest_Sync, sendRequest_Async, makeEmptyJSONLFile, appendToJSONL, readJSONL, getLastNLines, countLines, saveProgress, Errors
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Optional, Union
 import time, json, pprint, gzip
-from datetime import datetime
-import pickle, os, datetime
+import pickle, os, datetime, asyncio
+from tqdm import tqdm
 
 class PolymarketHandler:
-    def __init__(self, apiKey: str):
+    def __init__(self, apiKey: Union[str, None] = None):
         """
         Initializes the PolymarketHandler with the provided API key.
         
@@ -32,6 +32,127 @@ class PolymarketHandler:
         # cancellation, and other trading operations. Trading endpoints require authentication.
         self.baseURL_CLOB = "https://clob.polymarket.com"
 
+    async def getPriceHistory_async(self, marketID: str, outcomeIDs: tuple[str, str], **kwargs):
+        """
+        Fetches the historical price for a market. Makes simultaneous requests for both outcome tokens to speed up the process.
+
+        Args:
+            marketID (str): The unique market ID for which to fetch the price history.
+            outcomeIDs (tuple[str, str]): The unique outcome IDs for which to fetch the price history.
+        
+        Keyword Args:
+            startTs (int): The starting timestamp (in milliseconds) for the price history. Default is None, which means it will fetch from the earliest available data.
+            endTs (int): The ending timestamp (in milliseconds) for the price history. Default is None, which means it will fetch until the latest available data.
+            interval (str): The interval for the price history data. Avilable options are "max", "all", "1m", "1w", "1d", "6h", "1h"
+        """
+        
+        _params = {
+            **kwargs
+        }
+        
+        try:
+            # Get responses in parallel for both outcomes
+            results = await asyncio.gather(
+                sendRequest_Async(
+                    url = urljoin(self.baseURL_CLOB, "/prices-history"),
+                    method = "GET",
+                    params = {
+                        "market": outcomeIDs[0],
+                        **_params
+                    }
+                ),
+                sendRequest_Async(
+                    url = urljoin(self.baseURL_CLOB, "/prices-history"),
+                    method = "GET",
+                    params = {
+                        "market": outcomeIDs[1],
+                        **_params
+                    }
+                )
+            )
+            
+            jsonResponse_0 = await results[0].json()
+            jsonResponse_1 = await results[1].json()
+            
+            if "error" in jsonResponse_0 or "error" in jsonResponse_1:
+                return {
+                    "error": True,
+                    "code": Errors.REQUEST_ERROR,
+                    "msg": jsonResponse_0["error"] if "error" in jsonResponse_0 else jsonResponse_1["error"]
+                }
+            else:
+                return {
+                    "marketID": marketID,
+                    "outcome_0": (jsonResponse_0).get("history", []),
+                    "outcome_1": (jsonResponse_1).get("history", [])
+                }
+        except Exception as e:
+            return {
+                "error": True,
+                "code": Errors.UNKNOWN_ERROR,
+                "msg": f"{e}"
+            }
+
+    def getPriceHistory_sync(self, marketID: str, outcomeIDs: tuple[str, str], **kwargs):
+        """
+        Fetches the historical price for a market. Makes synchronous requests for both outcome, effectively doubling the fetch time.
+
+        Args:
+            marketID (str): The unique market ID for which to fetch the price history.
+            outcomeIDs (tuple[str, str]): The unique outcome IDs for which to fetch the price history.
+        
+        Keyword Args:
+            startTs (int): The starting timestamp (in milliseconds) for the price history. Default is None, which means it will fetch from the earliest available data.
+            endTs (int): The ending timestamp (in milliseconds) for the price history. Default is None, which means it will fetch until the latest available data.
+            interval (str): The interval for the price history data. Avilable options are "max", "all", "1m", "1w", "1d", "6h", "1h"
+        """
+        
+        _params = {
+            **kwargs
+        }
+        
+        try:
+            # Get responses in parallel for both outcomes
+            results = []
+            results.append(sendRequest_Sync(
+                url = urljoin(self.baseURL_CLOB, "/prices-history"),
+                method = "GET",
+                params = {
+                    "market": outcomeIDs[0],
+                    **_params
+                }
+            ))
+            results.append(sendRequest_Sync(
+                url = urljoin(self.baseURL_CLOB, "/prices-history"),
+                method = "GET",
+                params = {
+                    "market": outcomeIDs[1],
+                    **_params
+                }
+            ))
+            
+            jsonResponse_0 = results[0].json()
+            jsonResponse_1 = results[1].json()
+            
+            if "error" in jsonResponse_0 or "error" in jsonResponse_1:
+                return {
+                    "error": True,
+                    "code": Errors.REQUEST_ERROR,
+                    "msg": jsonResponse_0["error"] if "error" in jsonResponse_0 else jsonResponse_1["error"]
+                }
+            else:
+                return {
+                    "marketID": marketID,
+                    "outcome_0": (jsonResponse_0).get("history", []),
+                    "outcome_1": (jsonResponse_1).get("history", [])
+                }
+        except Exception as e:
+            return {
+                "error": True,
+                "code": Errors.UNKNOWN_ERROR,
+                "msg": f"{e}"
+            }
+
     def getAllEvents(self, active: bool = True, archived: bool = False, closed : bool = False, getMarkets:bool = True, **kwargs):
         """
         Fetches all events from the Polymarket API. By default saves the data to a 
@@ -41,8 +162,6 @@ class PolymarketHandler:
         
         # Function to process the raw data
         def _processData(data: Dict[str, Any]) -> Dict[str, Any]:
-            # pprint.pprint(data)
-            # exit()
             # For processing and normalizing the raw data from the API.
             returnData = {}
             
@@ -58,7 +177,7 @@ class PolymarketHandler:
             returnData["startDate"] = data.get("startDate", None)
             returnData["endDate"] = data.get("endDate", None)
             returnData["liquidity"] = data.get("liquidity", None)
-            returnData["description"] = data.get("description", None) # Deleted due to storage issues
+            returnData["description"] = data.get("description", "").replace("\n", " ").replace("\r", " ") if data.get("description", None) is not None else None # Deleted due to storage issues
             returnData["slug"] = data.get("slug", None)
             returnData["createdAt"] = data.get("createdAt", None)
             returnData["eventID"] = data.get("id", None)
@@ -101,7 +220,7 @@ class PolymarketHandler:
                             "spread": spread,                                       # In percentage
                             "active": market.get("active", None),
                             "liquidity": float(market.get("liquidity")) * 100 if market.get("liquidity", None) is not None else None,
-                            "description": market.get("description", None), # Deleted due to storage issues
+                            "description": market.get("description", "").replace("\n", " ").replace("\r", " ") if market.get("description", None) is not None else None, # Deleted due to storage issues
                             "createdAt": market.get("createdAt", None),
                             "startDate": market.get("startDate", None),
                             "endDate": market.get("endDate", None),
@@ -189,11 +308,158 @@ class PolymarketHandler:
 
         return None
 
-    def getAllMarkets(self, active: bool = True, archived: bool = False, closed : bool = False, getEvents:bool = False, **kwargs):
+    def getMarket(self, *, id: int | None = None, slug: str | None = None, tokenID: str | None = None, getPriceData: bool = False, **kwargs):
+        """
+        Fetches a market's data using either its unique market ID, slug, or token ID. 
+        If multiple identifiers are provided, it prioritizes them in the order of ID, 
+        slug, and then token ID.
+        """
+        # Function to process the raw data
+        def _processData(data: Dict[str, Any]) -> Dict[str, Any]:
+            # For processing and normalizing the raw data from the API.
+            returnData = {}
+            
+            # Processing
+            _createdAt = datetime.datetime.strptime(data.get("createdAt", "").split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S")  if data.get("createdAt", None) is not None else None
+            _startDate = datetime.datetime.strptime(data.get("startDate", "").split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S") if data.get("startDate", None) is not None else None
+            _endDate = datetime.datetime.strptime(data.get("endDate", "").split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S") if data.get("endDate", None) is not None else None
+            _now = datetime.datetime.now()
+            _diffDays = (_endDate - _now).days if _endDate is not None else None
+            _diffHours = (_endDate - _now).total_seconds() / 3600 if _endDate is not None else None
+            
+            # Event-level data
+            returnData["active"] = data.get("active", None)
+            returnData["marketID"] = data.get("id", "")
+            returnData["archived"] = data.get("archived", None)
+            returnData["closed"] = data.get("closed", None)
+            returnData["createdAt"] = _createdAt.isoformat() if _createdAt is not None else None
+            returnData["startDate"] = _startDate.isoformat() if _startDate is not None else None
+            returnData["endDate"] = _endDate.isoformat() if _endDate is not None else None
+            returnData["daysTillExpiry"] = _diffDays
+            returnData["hoursTillExpiry"] = _diffHours
+            returnData["liquidity"] = data.get("liquidity", None)
+            returnData["liquidityNum"] = data.get("liquidityNum", None)
+            returnData["volumeNum"] = data.get("volume", None)
+            returnData["volume1yr"] = data.get("volume1yr", None)
+            returnData["volumeAmm"] = data.get("volumeAmm", None)
+            returnData["volumeClob"] = data.get("volumeClob", None)
+            returnData["description"] = data.get("description", "").replace('\n', ' ').replace('\r', ' ') if data.get("description", None) is not None else None # Deleted due to storage issues
+            returnData["slug"] = data.get("slug", None)
+            returnData["spread"] = data.get("spread", None)
+            returnData["takerBaseFee"] = data.get("takerBaseFee", None)
+            returnData["makerBaseFee"] = data.get("makerBaseFee", None)
+            
+            # Market-level data
+            returnData["eventsCount"] = len(data.get("events", [])) if "events" in data and isinstance(data["events"], list) else 0
+            
+            # Disregard the Events for now
+            returnData["events"] = [{"slug": event["slug"]} for event in data.get("events")] if data.get("events", None) is not None else None
+            
+            # We take that each market can either be yes or no (As of coding date)
+            outcomes = json.loads(data.get("outcomes")) if data.get("outcomes", None) is not None else None
+            outcomePrices = json.loads(data.get("outcomePrices")) if data.get("outcomePrices", None) is not None else ""
+            tokenIDs = json.loads(data.get("clobTokenIds", ["",""])) if data.get("clobTokenIds", None) is not None else ["",""]
+
+            if isinstance(outcomes, list) and len(outcomes) == 2 and outcomePrices != "" and outcomePrices is not None:
+                # Outcome 0 - first outcome
+                returnData["outcome_0_price"] = float(outcomePrices[0])
+                returnData["outcome_0_return"] = round((1- returnData["outcome_0_price"]) / returnData["outcome_0_price"] * 100, 2) if returnData["outcome_0_price"] is not None and returnData["outcome_0_price"] != 0 else None
+                returnData["outcome_0_ID"] = str(tokenIDs[0]) if len(tokenIDs) > 0 else ""
+                
+                # Outcome 1 - second outcome
+                returnData["outcome_1_price"] = float(outcomePrices[1])
+                returnData["outcome_1_return"] = round((1 - returnData["outcome_1_price"]) / returnData["outcome_1_price"] * 100, 2) if returnData["outcome_1_price"] is not None and returnData["outcome_1_price"] != 0 else None
+                returnData["outcome_1_ID"] = str(tokenIDs[1]) if len(tokenIDs) > 1 else ""
+            
+            if getPriceData and returnData.get("outcome_0_ID", None) is not None and returnData.get("outcome_1_ID", None) is not None:
+                priceHistory = self.getPriceHistory_sync(returnData["marketID"], (returnData["outcome_0_ID"], returnData["outcome_1_ID"]), interval="all")
+                returnData["priceHistory"] = priceHistory
+            
+            return returnData
+    
+        endPoint = ""
+        if id is not None:
+            endPoint = f"/markets/{id}"
+            kwargs["id"] = id
+        elif slug is not None:
+            endPoint = f"/markets/slug/{slug}"
+            kwargs["slug"] = slug
+        elif tokenID is not None:
+            endPoint = f"/markets-by-token/{tokenID}"
+            kwargs["toke_id"] = tokenID
+        else:
+            raise ValueError("Invalid identifier provided. Please provide a valid id, slug, or tokenID.")
+        
+        _params = {**kwargs}
+        
+        res = sendRequest_Sync(
+            url = urljoin(self.baseURL_Gamma, endPoint),
+            method = "GET",
+            params = _params
+        )
+        return _processData(res.json())
+
+    def getLastCursorFromFile(self, filePath: str, n: int = 1000) -> tuple[str, int]:
+        """
+        Reads a .jsonl or .jsonl.gz file and returns the last "next_cursor" value found in the file. 
+        This is useful for resuming data fetching from where it left off in case of interruptions.
+
+        Args:
+            filePath (str): Path to the .jsonl or .jsonl.gz file from which to extract the last cursor value.
+            n (int): The number of lines from the end of the file to read for finding the last cursor.
+                This is an optimization to avoid reading the entire file if it's large. Default is 1000 lines.
+
+        Returns:
+            tuple[str, int]: A tuple containing the last "next_cursor" value found in the file and the line count in the file.
+            If the file is empty or no cursor is found, returns an empty string and 0.
+        """
+        # TODO: Reading the entire file might be sub-optimal for large files. Consider optimizing by reading only 
+        # the last few lines of the file using a two-pass approach.
+        print("Reading file...")
+        if filePath.endswith(".jsonl.gz") or filePath.endswith(".jsonl"):
+            lines = getLastNLines(filePath, n)
+        else:
+            raise ValueError("File must be a .jsonl or .jsonl.gz file.")
+        
+        print("Getting entry counts...")
+        lineCount = countLines(filePath)
+        print(f"Total entries in file: {lineCount}")
+        
+        for line in reversed(lines):
+            data = json.loads(line)
+            if "next_cursor" in data:
+                return (data["next_cursor"], lineCount)
+        
+        return ("", 0)  # Return empty string if no cursor is found
+    
+    def getAllMarkets(
+        self, 
+        active: Optional[bool] = True, 
+        archived: Optional[bool] = False, 
+        closed: Optional[bool] = False, 
+        getEvents: Optional[bool] = False, 
+        getPriceData: Optional[bool] = False, 
+        checkpoint: Optional[tuple[str | None, int]] = None,
+        **kwargs
+    ):
         """
         Fetches all events from the Polymarket API. By default saves the data to a 
-        JSONL file in the src/data/ directory. It is not able to hold all market data 
-        due to memory constraints.
+        JSONL file in the src/data/ directory. It is not able to hold all market data
+        due to memory constraints. 
+        
+        When getPricesData is set to True, it also fetches the historical price data 
+        for each market. Separate API calls are made for each outcome in each market, 
+        so it can significantly increase the time taken to fetch all data. Use with 
+        caution.
+        
+        Args:
+            getPriceData (bool): Whether to fetch the price data for each market. Each 
+                market is consisted of two outcome tokens, each one has a price.
+            checkpoint (str, int):  A tuple consisted of the cursor value and the line 
+                count. The cursor value to start fetching data from. This is used for 
+                pagination. If not provided, it will start from the beginning. This is 
+                useful for resuming data fetching from where it left off in case of 
+                interruptions.
         """
         
         # Function to process the raw data
@@ -202,25 +468,34 @@ class PolymarketHandler:
             returnData = {}
             
             # Processing
-            _createdAt = datetime.datetime.strptime(data.get("createdAt", None).split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S")  if data.get("createdAt", None) is not None else None
-            _startDate = datetime.datetime.strptime(data.get("startDate", None).split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S") if data.get("startDate", None) is not None else None
-            _endDate = datetime.datetime.strptime(data.get("endDate", None).split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S") if data.get("endDate", None) is not None else None
-            _diff = (_endDate - _createdAt).days if _endDate is not None and _createdAt is not None else None
+            _createdAt = datetime.datetime.strptime(data.get("createdAt", "").split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S")  if data.get("createdAt", None) is not None else None
+            _startDate = datetime.datetime.strptime(data.get("startDate", "").split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S") if data.get("startDate", None) is not None else None
+            _endDate = datetime.datetime.strptime(data.get("endDate", "").split('.')[0].replace("Z",""), "%Y-%m-%dT%H:%M:%S") if data.get("endDate", None) is not None else None
+            _now = datetime.datetime.now()
+            _diffDays = (_endDate - _now).days if _endDate is not None else None
+            _diffHours = (_endDate - _now).total_seconds() / 3600 if _endDate is not None else None
             
             # Event-level data
             returnData["active"] = data.get("active", None)
-            returnData["marketID"] = data.get("id", None)
+            returnData["marketID"] = data.get("id", "")
             returnData["archived"] = data.get("archived", None)
             returnData["closed"] = data.get("closed", None)
             returnData["createdAt"] = _createdAt.isoformat() if _createdAt is not None else None
             returnData["startDate"] = _startDate.isoformat() if _startDate is not None else None
             returnData["endDate"] = _endDate.isoformat() if _endDate is not None else None
-            returnData["daysTillExpiry"] =  _diff
-            returnData["liquidity"] = data.get("liquidity", None)
-            returnData["description"] = data.get("description", None) # Deleted due to storage issues
+            returnData["daysTillExpiry"] =  _diffDays
+            returnData["hoursTillExpiry"] = _diffHours
+            returnData["description"] = data.get("description", "").replace('\n', ' ').replace('\r', ' ') if data.get("description", None) is not None else None # Deleted due to storage issues
             returnData["slug"] = data.get("slug", None)
-            returnData["createdAt"] = data.get("createdAt", None)
             returnData["spread"] = data.get("spread", None)
+            returnData["takerBaseFee"] = data.get("takerBaseFee", None)
+            returnData["makerBaseFee"] = data.get("makerBaseFee", None)
+            returnData["liquidity"] = data.get("liquidity", None)
+            returnData["liquidityNum"] = data.get("liquidityNum", None)
+            returnData["volumeNum"] = data.get("volume", None)
+            returnData["volume1yr"] = data.get("volume1yr", None)
+            returnData["volumeAmm"] = data.get("volumeAmm", None)
+            returnData["volumeClob"] = data.get("volumeClob", None)
             
             # Market-level data
             returnData["eventsCount"] = len(data.get("events", [])) if "events" in data and isinstance(data["events"], list) else 0
@@ -229,14 +504,24 @@ class PolymarketHandler:
             returnData["events"] = None
             
             # We take that each market can either be yes or no (As of coding date)
-            outcomes = json.loads(data.get("outcomes", None)) if data.get("outcomes", None) is not None else None
-            outcomePrices = json.loads(data.get("outcomePrices", None)) if data.get("outcomePrices", None) is not None else None
+            outcomes = json.loads(data.get("outcomes")) if data.get("outcomes", None) is not None else None
+            outcomePrices = json.loads(data.get("outcomePrices")) if data.get("outcomePrices", None) is not None else ""
+            tokenIDs = json.loads(data.get("clobTokenIds", ["",""])) if data.get("clobTokenIds", None) is not None else ["",""]
 
-            if isinstance(outcomes, list) and len(outcomes) == 2:
+            if isinstance(outcomes, list) and len(outcomes) == 2 and outcomePrices != "" and outcomePrices is not None:
+                # Outcome 0 - first outcome
                 returnData["outcome_0_price"] = float(outcomePrices[0])
                 returnData["outcome_0_return"] = round((1- returnData["outcome_0_price"]) / returnData["outcome_0_price"] * 100, 2) if returnData["outcome_0_price"] is not None and returnData["outcome_0_price"] != 0 else None
+                returnData["outcome_0_ID"] = str(tokenIDs[0]) if len(tokenIDs) > 0 else ""
+                
+                # Outcome 1 - second outcome
                 returnData["outcome_1_price"] = float(outcomePrices[1])
                 returnData["outcome_1_return"] = round((1 - returnData["outcome_1_price"]) / returnData["outcome_1_price"] * 100, 2) if returnData["outcome_1_price"] is not None and returnData["outcome_1_price"] != 0 else None
+                returnData["outcome_1_ID"] = str(tokenIDs[1]) if len(tokenIDs) > 1 else ""
+            
+            if getPriceData and returnData.get("outcome_0_ID", None) is not None and returnData.get("outcome_1_ID", None) is not None:
+                priceHistory = self.getPriceHistory_sync(returnData["marketID"], (returnData["outcome_0_ID"], returnData["outcome_1_ID"]), interval="all")
+                returnData["priceHistory"] = priceHistory
             
             return returnData
 
@@ -246,16 +531,20 @@ class PolymarketHandler:
         if "saveFile" in kwargs and not kwargs["saveFile"].endswith(".jsonl"):
             if not os.path.isfile(kwargs["saveFile"]):
                 makeEmptyJSONLFile(kwargs["saveFile"], compressed = kwargs["saveFile"].endswith(".gz"))
-        
+            
         _params = {
             "limit": 500,
             "active": active,
             "archived": archived,
             "closed": closed,
             **kwargs["reqOptions"],
-            "order": "liquidity",
         }
-
+        
+        # Pickup where left off, if nextCursor is provided
+        if checkpoint is not None:
+            _params["after_cursor"] = checkpoint[0]
+            print(f"Resuming data fetching from cursor: {checkpoint[0]} | Line count in file: {checkpoint[1]}")
+        
         # Get the first event
         res = sendRequest_Sync(
             url = urljoin(self.baseURL_Gamma, "/markets/keyset"),
@@ -271,8 +560,8 @@ class PolymarketHandler:
             jsonResponse = {}
         
         # Continue getting the rest with cursor pagination
-        allEventCounter = 0
-        counter = 0
+        allEventCounter = 0 if checkpoint is None else checkpoint[1]
+        counter = 0 
         while res.status_code == 200 and "next_cursor" in jsonResponse and "next_cursor" in jsonResponse:
             print(f"Fetching next page of markets... (Page {counter + 2}) | Total markets fetched so far: {allEventCounter}")
             counter += 1
@@ -287,30 +576,40 @@ class PolymarketHandler:
             try:
                 jsonResponse = res.json()
                 allEventCounter += len(jsonResponse.get("markets", []))
+                
+                # Save the progress in a file
+                saveProgress(kwargs.get("saveFile"), {
+                    "next_cursor": jsonResponse.get("next_cursor"),
+                    "eventCount": allEventCounter,
+                    "timestamp": int(datetime.datetime.now().timestamp())
+                })
 
                 if not isinstance(jsonResponse, dict):
                     print(f"Unexpected JSON type: {type(jsonResponse)}")
                     break
                 
                 processedList = []
-                for event in jsonResponse.get("markets", []):
+                for event in tqdm(jsonResponse.get("markets", []), desc="Processing markets"):
                     processedData = _processData(event)
+                    
+                    # For consistency between all rows
+                    processedData["next_cursor"] = "" 
+                    
                     processedList.append(processedData)
+                
+                # Add the next cursor to the last item of the batch so that if process ran into 
+                # errors, we could pickup where we left off
+                processedList[-1]["next_cursor"] = jsonResponse["next_cursor"]
                 
                 # We do this so the script opens the file only once and appends to it, instead of 
                 # opening and closing the file for each event which would be very inefficient.
                 appendToJSONL(kwargs["saveFile"], processedList)
-                print(f"Liquidity: {jsonResponse.get('markets', [])[0].get('id', None)} -> {jsonResponse.get('markets', [])[-1].get('id', None)}")
+
+                print(f"   {_params["order"]}: {jsonResponse.get('markets', [])[-1].get(_params["order"], None)} -> {jsonResponse.get('markets', [])[0].get(_params["order"], None)} | ")
                     
                 if jsonResponse.get("next_cursor", None) is None:
                     break
             except Exception as e:
                 raise e
-                print(f"JSON parsing failed: {repr(e)}")
-                print(jsonResponse["markets"][0])
-                print(f"Status code: {res.status_code}")
-                print(f"Headers: {res.headers}")
-                print(f"Raw response text: {res.text[:1000]}")
-                break
 
         return None
