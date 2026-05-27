@@ -1,7 +1,16 @@
 # Utility functions
 import requests, aiohttp, json, os, gzip
 from typing import Dict, List, Optional, Any, Union
-from enum import StrEnum
+from enum import Enum
+
+# Used for compatibility with python 3.11 and below, which don't have StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
 
 def sendRequest_Sync(
     url: str,

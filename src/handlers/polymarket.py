@@ -602,7 +602,7 @@ class PolymarketHandler:
                 # opening and closing the file for each event which would be very inefficient.
                 appendToJSONL(kwargs["saveFile"], processedList)
 
-                print(f"   {_params["order"]}: {jsonResponse.get('markets', [])[-1].get(_params["order"], None)} -> {jsonResponse.get('markets', [])[0].get(_params["order"], None)} | ")
+                print(f"   {_params['order']}: {jsonResponse.get('markets', [])[-1].get(_params['order'], None)} -> {jsonResponse.get('markets', [])[0].get(_params['order'], None)} | ")
                     
                 if jsonResponse.get("next_cursor", None) is None:
                     break
