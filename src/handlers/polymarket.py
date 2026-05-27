@@ -597,9 +597,6 @@ class PolymarketHandler:
                     
                     processedList.append(processedData)
                 
-                # Add the next cursor to the last item of the batch so that if process ran into 
-                # errors, we could pickup where we left off
-                processedList[-1]["next_cursor"] = jsonResponse["next_cursor"]
                 
                 # We do this so the script opens the file only once and appends to it, instead of 
                 # opening and closing the file for each event which would be very inefficient.
@@ -609,6 +606,10 @@ class PolymarketHandler:
                     
                 if jsonResponse.get("next_cursor", None) is None:
                     break
+                else:
+                    # Add the next cursor to the last item of the batch so that if process ran into 
+                    # errors, we could pickup where we left off
+                    processedList[-1]["next_cursor"] = jsonResponse["next_cursor"]
             except Exception as e:
                 raise e
 
