@@ -7,20 +7,33 @@ from typing import Dict, Any, List, Optional, Union
 import time, json, pprint, gzip
 import pickle, os, datetime, asyncio
 from tqdm import tqdm
+from web3 import Web3
 
 class PolymarketHandler:
-    def __init__(self, apiKey: Union[str, None] = None):
+    def __init__(self, polymarketAPIkey: Union[str, None] = None, web3APIkey: Union[str, None] = None):
         """
-        Initializes the PolymarketHandler with the provided API key.
+        Initializes the PolymarketHandler with the provided API keys.
         
         Documentation: https://docs.polymarket.com/api-reference/rate-limits
         
         Args:
-            apiKey (str): The API key for authenticating with the Polymarket API.
+            polymarketAPIkey (str): The API key for authenticating with the Polymarket API.
+            web3APIkey (str): The API key for authenticating with the Web3 API providers (e.g. alchemy, infura, etc.)
         """
+        # Get necessary parameters
+        self.polymarketAPIkey = polymarketAPIkey
+        self.web3APIkey = web3APIkey
+        self.w3 = None
         
-        self.apiKey = apiKey
+        if not self.polymarketAPIkey:
+            print("Warning: No Polymarket API key provided.")
         
+        if not self.web3APIkey:
+            print("Warning: No Web3 API key provided.")
+        else:
+            print(self.web3APIkey)
+            self.w3 = Web3(Web3.HTTPProvider(f"https://polygon-mainnet.g.alchemy.com/v2/{self.web3APIkey}"))
+
         # Base URLs
         # Gamma - Markets, events, tags, series, comments, sports, search, and public profiles
         self.baseURL_Gamma = "https://gamma-api.polymarket.com"
@@ -75,6 +88,13 @@ class PolymarketHandler:
             jsonResponse_1 = await results[1].json()
             
             if "error" in jsonResponse_0 or "error" in jsonResponse_1:
+                if "Max retries exceeded" in jsonResponse_0["error"] or "Max retries exceeded" in jsonResponse_1["error"]:
+                    return {
+                        "error": True,
+                        "code": Errors.RATE_LIMITED,
+                        "msg": jsonResponse_0["error"]
+                    }
+                
                 return {
                     "error": True,
                     "code": Errors.REQUEST_ERROR,
@@ -135,6 +155,13 @@ class PolymarketHandler:
             jsonResponse_1 = results[1].json()
             
             if "error" in jsonResponse_0 or "error" in jsonResponse_1:
+                if "Max retries exceeded" in jsonResponse_0["error"] or "Max retries exceeded" in jsonResponse_1["error"]:
+                    return {
+                        "error": True,
+                        "code": Errors.RATE_LIMITED,
+                        "msg": jsonResponse_0["error"]
+                    }
+                
                 return {
                     "error": True,
                     "code": Errors.REQUEST_ERROR,
@@ -614,3 +641,57 @@ class PolymarketHandler:
                 raise e
 
         return None
+    
+    def getBatchPriceHistory(self, marketID: list[str], outcomeIDs: list[str], **kwargs):
+        """
+        Fetches the historical price for a batch of markets. Makes asynchronous requests for both outcomes of each market, significantly reducing the fetch time compared to synchronous requests.
+
+        Args:
+            marketID (str): The unique market ID for which to fetch the price history. For each there should be a corresponding outcome ID passed.
+            outcomeIDs (list[str]): A list of unique outcome IDs for which to fetch the price history.
+
+        Keyword Args:
+            startTs (int): The starting timestamp (in milliseconds) for the price history. Default is None, which means it will fetch from the earliest available data.
+            endTs (int): The ending timestamp (in milliseconds) for the price history. Default is None, which means it will fetch until the latest available data.
+            interval (str): The interval for the price history data. Avilable options are "max", "all", "1m", "1w", "1d", "6h", "1h"
+        """
+        
+        _params = {
+            **kwargs
+        }
+        
+        try:   
+            batchResult = sendRequest_Sync(
+                url = urljoin(self.baseURL_CLOB, "/batch-prices-history"),
+                method = "POST",
+                payload = {
+                    "markets": outcomeIDs,
+                    **_params
+                }
+            )  
+            jsonResult = batchResult.json()
+            
+            # Handle errors
+            if "error" in jsonResult:
+                if "Max retries exceeded" in jsonResult["error"]:
+                    return {
+                        "error": True,
+                        "code": Errors.RATE_LIMITED,
+                        "msg": jsonResult["error"]
+                    }
+                
+                # General error
+                return {
+                    "error": True,
+                    "code": Errors.REQUEST_ERROR,
+                    "msg": jsonResult["error"]
+                }
+                
+            # Process and return the data
+            return jsonResult
+        except Exception as e:
+            return {
+                "error": True,
+                "code": Errors.UNKNOWN_ERROR,
+                "msg": f"{e}"
+            }
