@@ -1,6 +1,6 @@
 from pprint import pprint
 from urllib.parse import urljoin
-from src.utils.utils import sendRequest_Sync, sendRequest_Async, makeEmptyJSONLFile, appendToJSONL, readJSONL, getLastNLines, countLines, saveProgress, Errors
+from src.utils.utils import *
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Optional, Union
@@ -8,11 +8,16 @@ import time, json, pprint, gzip
 import pickle, os, datetime, asyncio
 from tqdm import tqdm
 from web3 import Web3
+from eth_abi import decode
+import concurrent.futures
+from functools import wraps
+import time
 
 class PolymarketHandler:
-    def __init__(self, polymarketAPIkey: Union[str, None] = None, web3APIkey: Union[str, None] = None):
+    def __init__(self, polymarketAPIkey: Union[str, None] = None, web3APIkey: Union[str, None] = None, provider: str = None):
         """
         Initializes the PolymarketHandler with the provided API keys.
+        Some methods use polymarket API, however, some need a web3 provider to get the actual data from blockchain
         
         Documentation: https://docs.polymarket.com/api-reference/rate-limits
         
@@ -31,8 +36,19 @@ class PolymarketHandler:
         if not self.web3APIkey:
             print("Warning: No Web3 API key provided.")
         else:
-            print(self.web3APIkey)
-            self.w3 = Web3(Web3.HTTPProvider(f"https://polygon-mainnet.g.alchemy.com/v2/{self.web3APIkey}"))
+            _endpoint = ""
+            if provider.lower() == "alchemy":
+                _endpoint = f"https://polygon-mainnet.g.alchemy.com/v2/{self.web3APIkey}"
+            elif provider.lower() == "dwellir":
+                _endpoint = f"https://api-polygon-mainnet-full.n.dwellir.com/{self.web3APIkey}"
+            elif provider.lower() == "drpc":
+                _endpoint = f"https://lb.drpc.live/polygon/{self.web3APIkey}"
+            else:
+                raise ValueError("Invalid provider specified. Please choose either 'alchemy', 'dwellir' or 'drpc'.")
+            
+            self.w3 = {
+                "polygon": Web3(Web3.HTTPProvider(_endpoint))
+            }
 
         # Base URLs
         # Gamma - Markets, events, tags, series, comments, sports, search, and public profiles
@@ -44,6 +60,27 @@ class PolymarketHandler:
         # Data - Orderbook data, pricing, midpoints, spreads, and price history. Also handles order placement,
         # cancellation, and other trading operations. Trading endpoints require authentication.
         self.baseURL_CLOB = "https://clob.polymarket.com"
+        
+        # Polymarket contract addresses
+        self.exchange_CFT_v2 = "0xE111180000d2663C0091e4f400237545B87B996B"
+        self.exchange_NegRiskCFT_v2 = "0xe2222d279d744050d28e00520010520000310F59"
+        self.exchange_CFT_v1 = "0" # TODO
+        self.exchange_NegRiskCFT_v1 = "0" # TODO
+        
+        # Polymarket logs
+        self.exchange_CFT_v2_OrderFilled_topic0 = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
+        
+        # Polymarket contracts
+        self.contract_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_CFT_v2, abi = loadABI("polygon", "polymarket_exchange_CFT_v2"))
+        self.contract_Neg_Risk_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_NegRiskCFT_v2, abi = loadABI("polygon", "polymarket_exchange_neg_risk_CFT"))
+
+    def __requireWeb3APIkey(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if not self.web3APIkey:
+                raise ValueError("This method requires a Web3 API key. Please provide one during initialization.")
+            return func(self, *args, **kwargs)
+        return wrapper
 
     async def getPriceHistory_async(self, marketID: str, outcomeIDs: tuple[str, str], **kwargs):
         """
@@ -695,3 +732,135 @@ class PolymarketHandler:
                 "code": Errors.UNKNOWN_ERROR,
                 "msg": f"{e}"
             }
+
+    @__requireWeb3APIkey
+    def getAllTrades(
+            self, 
+            saveLocation: str, 
+            fromBlock: Union[int, None], 
+            toBlock: Union[int, None, str],
+            blockBatchSize: int = 1000,
+            parallelbatches: int = 1
+        ):
+        """
+        Using a web3 RPC, gets all trades for polymarket v1 and v2 and saves them into a parquet database.
+        
+        saveLocation (str): The directory to save the parquet databases
+        """
+        
+        CTF_V2_DATA_TYPES = ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"]
+        CTF_V2_DATA_NAMES = ["side", "tokenId", "makerAmountFilled", "takerAmountFilled", "fee", "builder", "metadata"]
+
+        def _CTF_V2_fastDecode(log):
+            """
+            For decoding the CTF exchange (V2) events more quickly.
+            """
+            # Decode non-indexed fields from data
+            # log["data"] is already bytes in web3.py — no need for .hex() / fromhex()
+            raw = bytes(log["data"])
+            decoded_data = decode(CTF_V2_DATA_TYPES, raw)
+            result = dict(zip(CTF_V2_DATA_NAMES, decoded_data))
+
+            # Decode indexed fields from topics[1], topics[2], topics[3]
+            # topics[0] is the event signature hash
+            result["orderHash"] = log["topics"][1]           # already bytes32
+            result["maker"]     = "0x" + log["topics"][2].hex()[-40:]  # last 20 bytes → address
+            result["taker"]     = "0x" + log["topics"][3].hex()[-40:]  # last 20 bytes → address
+            
+            returnDict = {
+                "tokenId": str(result["tokenId"]),
+                "side": result["side"],
+                "makerAmountFilled": result["makerAmountFilled"],
+                "takerAmountFilled": result["takerAmountFilled"],
+                "orderHash": result["orderHash"].hex(),
+                "taker": result["taker"],
+                "maker": result["maker"],
+            }
+
+            return returnDict
+        
+        def fetchLogs(blockRange):
+            fromBlock, toBlock = blockRange
+            try:
+                logs = self.w3["polygon"].eth.get_logs({
+                    "address": self.exchange_CFT_v2,
+                    "fromBlock": fromBlock,
+                    "toBlock": toBlock,
+                    "topics": [self.exchange_CFT_v2_OrderFilled_topic0]
+                })
+                print("Got", len(logs), "logs")
+                return logs
+            except Exception as e:
+                print(f"Error fetching range {fromBlock}-{toBlock}: {e}")
+                return []
+
+        # Make the directory if not there
+        if not os.path.exists(saveLocation):
+            print("Making a new directory for saving the trade data since it does not exist.")
+            os.makedirs(saveLocation)
+
+        # TODO: Check for existing trades
+        
+        if toBlock == "latest":
+            toBlock = self.w3["polygon"].eth.block_number
+        
+        # Get the logs
+        allLogs = []
+        
+        _retries = 0
+        currentTo = toBlock
+        currentFrom = max(fromBlock, currentTo - blockBatchSize * ) if fromBlock is not None else 0
+        while fromBlock <= currentTo:
+            if 10 < _retries:
+                raise Exception("Max retries reached. Aborting")
+            
+            try:
+                print(f"Fetching logs from block {currentFrom} to {currentTo}. Remaining blocks: {currentTo - fromBlock} ({(currentTo - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)")
+
+                # logs = self.w3["polygon"].eth.get_logs({
+                #     "address": self.exchange_CFT_v2,
+                #     "fromBlock": currentFrom,
+                #     "toBlock": currentTo,
+                #     "topics": [self.exchange_CFT_v2_OrderFilled_topic0]
+                # })
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    blockRanges = []
+                    for i in range(currentFrom, currentTo + 1, blockBatchSize):
+                        start = i
+                        end = min(i + blockBatchSize - 1, currentTo)
+                        blockRanges.append((start, end))
+                    results = executor.map(fetchLogs, )
+                    
+                    # 4. Aggregate the results into a single list
+                    for logs in results:
+                        logs.extend(logs)
+                
+                print("Decoding logs...")
+                for log in tqdm(logs, desc="Decoding OrderFilled logs"):
+                    # Decode the log
+                    decoded = _CTF_V2_fastDecode(log)
+                    
+                    # Add block data to the transaction
+                    decoded["blockTimestamp"] = str(int(log["blockTimestamp"].replace("0x", ""), 16))
+                    decoded["blockNumber"] = str(log["blockNumber"])
+                    
+                    allLogs.append(decoded)
+                
+                # Save the dataframe as parquet
+                tmpDF = pd.DataFrame(allLogs)
+                tmpDF.to_parquet(os.path.join(saveLocation, f"trades_{currentFrom}_{currentTo}.parquet"), index=False)
+                print("df size", tmpDF.memory_usage(deep=True).sum() / (1024**2), "MB")
+                exit()
+                
+                currentTo -= blockBatchSize
+                currentFrom = max(fromBlock, currentTo - blockBatchSize) if fromBlock is not None else 0
+                
+                # Reset the retries after a successful fetch
+                _retries = 0 
+            except Exception as e:
+                print(f"Failed to fetch blocks from {currentFrom} to {currentTo}. Error: {e}")
+                
+                time.sleep(1)
+                _retries += 1
+

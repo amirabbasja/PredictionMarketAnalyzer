@@ -9,7 +9,11 @@ import asyncio
 
 load_dotenv()
 
-handler = PolymarketHandler(os.getenv("polymarket_api_key"))
+handler = PolymarketHandler(
+    os.getenv("polymarket_api_key", None),
+    os.getenv("drpcAPI_key", None),
+    provider = "drpc"
+)
 
 if sys.argv[1] == "--getAllEvents":
     result = handler.getAllEvents(
@@ -125,5 +129,13 @@ elif sys.argv[1] == "--toCsv":
     
     df = pd.DataFrame(data)
     df.to_csv(f"src/data/{fileName}.csv", index=True)
+elif sys.argv[1] == "--getAllTrades":
+    handler.getAllTrades(
+        saveLocation = f"src/data/polymarketTrades", 
+        toBlock = "latest",
+        fromBlock = 0,
+        blockBatchSize = 1_000,
+        parallelBatches = 10
+    )
 else:
     print("Invalid command.")

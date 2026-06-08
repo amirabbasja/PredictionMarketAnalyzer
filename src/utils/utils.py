@@ -289,7 +289,31 @@ def saveProgress(path: str, data: Dict[str, Any]) -> None:
     # Save it back to the file (this creates it if it didn't exist)
     with open(saveFile, 'w', encoding='utf-8') as f:
         json.dump(file_data, f, indent=4)
+
+def loadABI(blockchain: str, contractName: str) -> Optional[Dict[str, Any]]:
+    """
+    Load the ABI for a given blockchain and contract name from the ABIs directory.
+    The ABI files should have `.abi` extension
     
+    Args:
+        blockchain: The name of the blockchain (e.g. "polygon")
+        contractName: The name of the contract (e.g. "exchange_CFT_v2", no extensions)
+    
+    Returns:
+        The ABI as a list of dictionaries, or None if not found
+    """
+    # Process contract name
+    contractName = contractName.replace(".abi", "").replace(".json", "")
+    
+    abiPath = os.path.join("src", "ABIs", blockchain, f"{contractName}.abi")
+    
+    if not os.path.isfile(abiPath):
+        print(f"ABI file not found: {abiPath}")
+        return None
+    
+    with open(abiPath, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
 class Errors(StrEnum):
     MISSING_API_KEY = "UNACCEPTABLE_API_KEY"
     WRONG_ARGUMENTS = "WRONG_ARGUMENTS"
