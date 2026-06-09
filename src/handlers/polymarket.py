@@ -740,7 +740,7 @@ class PolymarketHandler:
             fromBlock: Union[int, None], 
             toBlock: Union[int, None, str],
             blockBatchSize: int = 1000,
-            parallelbatches: int = 1
+            parallelRequests: int = 1
         ):
         """
         Using a web3 RPC, gets all trades for polymarket v1 and v2 and saves them into a parquet database.
@@ -782,13 +782,15 @@ class PolymarketHandler:
         def fetchLogs(blockRange):
             fromBlock, toBlock = blockRange
             try:
+                # Get logs for polymarket CTF v2 exchange
+                print("Sent request for range", fromBlock, "-", toBlock)
                 logs = self.w3["polygon"].eth.get_logs({
                     "address": self.exchange_CFT_v2,
                     "fromBlock": fromBlock,
                     "toBlock": toBlock,
                     "topics": [self.exchange_CFT_v2_OrderFilled_topic0]
                 })
-                print("Got", len(logs), "logs")
+                print("Got", len(logs), "logs:", logs[0]["blockNumber"], "-", logs[-1]["blockNumber"])
                 return logs
             except Exception as e:
                 print(f"Error fetching range {fromBlock}-{toBlock}: {e}")
@@ -804,37 +806,34 @@ class PolymarketHandler:
         if toBlock == "latest":
             toBlock = self.w3["polygon"].eth.block_number
         
+        
         # Get the logs
         allLogs = []
         
         _retries = 0
-        currentTo = toBlock
-        currentFrom = max(fromBlock, currentTo - blockBatchSize * ) if fromBlock is not None else 0
-        while fromBlock <= currentTo:
+        batchEnd = toBlock
+        while fromBlock <= batchEnd:
             if 10 < _retries:
                 raise Exception("Max retries reached. Aborting")
             
+            batchStart = max(batchEnd - blockBatchSize * parallelRequests + 1, fromBlock)
             try:
-                print(f"Fetching logs from block {currentFrom} to {currentTo}. Remaining blocks: {currentTo - fromBlock} ({(currentTo - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)")
+                print(f"Fetching logs from block {batchStart} to {batchEnd}. Remaining blocks: {batchEnd - fromBlock} ({(batchEnd - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)")
 
-                # logs = self.w3["polygon"].eth.get_logs({
-                #     "address": self.exchange_CFT_v2,
-                #     "fromBlock": currentFrom,
-                #     "toBlock": currentTo,
-                #     "topics": [self.exchange_CFT_v2_OrderFilled_topic0]
-                # })
                 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                logs = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=parallelRequests) as executor:
+                    subBatch = range(batchEnd, batchStart - 1, -blockBatchSize)
                     blockRanges = []
-                    for i in range(currentFrom, currentTo + 1, blockBatchSize):
-                        start = i
-                        end = min(i + blockBatchSize - 1, currentTo)
-                        blockRanges.append((start, end))
-                    results = executor.map(fetchLogs, )
+                    for _batch in subBatch:
+                        subBatchEnd = _batch
+                        subBatchStart = max(subBatchEnd - blockBatchSize + 1, fromBlock)
+                        blockRanges.append((subBatchStart, subBatchEnd))
+                    results = executor.map(fetchLogs, blockRanges)
                     
                     # 4. Aggregate the results into a single list
-                    for logs in results:
-                        logs.extend(logs)
+                    for _logs in results:
+                        logs.extend(_logs)
                 
                 print("Decoding logs...")
                 for log in tqdm(logs, desc="Decoding OrderFilled logs"):
@@ -849,17 +848,16 @@ class PolymarketHandler:
                 
                 # Save the dataframe as parquet
                 tmpDF = pd.DataFrame(allLogs)
-                tmpDF.to_parquet(os.path.join(saveLocation, f"trades_{currentFrom}_{currentTo}.parquet"), index=False)
+                tmpDF.to_parquet(os.path.join(saveLocation, f"trades_{batchStart}_{batchEnd}.parquet"), index=False)
                 print("df size", tmpDF.memory_usage(deep=True).sum() / (1024**2), "MB")
                 exit()
                 
-                currentTo -= blockBatchSize
-                currentFrom = max(fromBlock, currentTo - blockBatchSize) if fromBlock is not None else 0
+                batchEnd -= blockBatchSize * parallelProcesses
                 
                 # Reset the retries after a successful fetch
                 _retries = 0 
             except Exception as e:
-                print(f"Failed to fetch blocks from {currentFrom} to {currentTo}. Error: {e}")
+                print(f"Failed to fetch blocks from {batchStart} to {batchEnd}. Error: {e}")
                 
                 time.sleep(1)
                 _retries += 1

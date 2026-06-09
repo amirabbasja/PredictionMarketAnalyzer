@@ -134,8 +134,8 @@ elif sys.argv[1] == "--getAllTrades":
         saveLocation = f"src/data/polymarketTrades", 
         toBlock = "latest",
         fromBlock = 0,
-        blockBatchSize = 1_000,
-        parallelBatches = 10
+        blockBatchSize = 1000,
+        parallelRequests = 10
     )
 else:
     print("Invalid command.")
