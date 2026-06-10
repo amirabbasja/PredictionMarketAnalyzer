@@ -742,7 +742,8 @@ class PolymarketHandler:
             toBlock: Union[int, None, str],
             blockBatchSize: int = 1000,
             parallelRequests: int = 1,
-            saveBlockRange: int = None
+            saveBlockRange: int = None, 
+            decodeLogs: bool = True
         ):
         """
         Using a web3 RPC, gets all trades for polymarket v1 and v2 and saves them into a parquet database.
@@ -866,7 +867,15 @@ class PolymarketHandler:
                 
                 for log in tqdm(logs, desc="Decoding OrderFilled logs", leave = False):
                     # Decode the log
-                    decoded = _CTF_V2_fastDecode(log)
+                    if decodeLogs:
+                        decoded = _CTF_V2_fastDecode(log)
+                    else:
+                        decoded = {
+                            "log": log,
+                            "method": "OrderFilled",
+                            "topic0": self.exchange_CFT_v2_OrderFilled_topic0,
+                            "contract": "CTF_V2"
+                        }
                     
                     # Add block data to the transaction
                     decoded["blockTimestamp"] = str(int(log["blockTimestamp"].replace("0x", ""), 16))

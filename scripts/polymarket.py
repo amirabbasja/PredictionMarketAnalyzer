@@ -136,7 +136,8 @@ elif sys.argv[1] == "--getAllTrades":
         fromBlock = 0,
         blockBatchSize = 100,
         parallelRequests = 10,
-        saveBlockRange = 100_000
+        saveBlockRange = 100_000,
+        decodeLogs = False
     )
 else:
     print("Invalid command.")
