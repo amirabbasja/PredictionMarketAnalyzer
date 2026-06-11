@@ -838,6 +838,7 @@ class PolymarketHandler:
         
         _retries = 0
         batchEnd = toBlock
+        _startTime = time.time()
         while fromBlock <= batchEnd:
             if 10 < _retries:
                 raise Exception("Max retries reached. Aborting")
@@ -851,6 +852,7 @@ class PolymarketHandler:
                     parquetSaveBlockRange[1] = batchEnd
                 
                 logs = []
+                _batchStartTime = time.time()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=parallelRequests) as executor:
                     subBatch = range(batchEnd, batchStart - 1, -blockBatchSize)
                     blockRanges = []
@@ -863,7 +865,7 @@ class PolymarketHandler:
                     # 4. Aggregate the results into a single list
                     for _logs in results:
                         logs.extend(_logs)
-                print(f"Fethced {toBlock - batchStart + 1} blocks so far                                                                                                               ")
+                print(f"Fetched {toBlock - batchStart + 1} blocks so far                                                                                                               ")
                 
                 for log in tqdm(logs, desc="Decoding OrderFilled logs", leave = False):
                     # Decode the log
@@ -882,7 +884,7 @@ class PolymarketHandler:
                     decoded["blockNumber"] = str(log["blockNumber"])
                     
                     allLogs.append(decoded)
-                print(f"Gathered {len(allLogs)} logs so far | size: {getObjectSize(allLogs)}")
+                print(f"Gathered {len(allLogs)} logs so far | size: {getObjectSize(allLogs)} | Cumulative time: {time.time() - _startTime:.2f}s | Batch time: {time.time() - _batchStartTime:.2f}s")
 
                 # Save the dataframe as parquet
                 if saveBlockRange is not None:
