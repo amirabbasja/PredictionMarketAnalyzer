@@ -13,6 +13,8 @@ import concurrent.futures
 import gc
 from functools import wraps
 import time
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 class PolymarketHandler:
     def __init__(self, polymarketAPIkey: Union[str, None] = None, web3APIkey: Union[str, None] = None, provider: str = None):
@@ -221,7 +223,7 @@ class PolymarketHandler:
     def getAllEvents(self, active: bool = True, archived: bool = False, closed : bool = False, getMarkets:bool = True, **kwargs):
         """
         Fetches all events from the Polymarket API. By default saves the data to a 
-        JSONL file in the src/data/ directory. It is not able to hold all market data 
+        parquet/JSONL file in the src/data/ directory. It is not able to hold all market data 
         due to memory constraints.
         """
         
@@ -306,9 +308,35 @@ class PolymarketHandler:
         if "saveFile" not in kwargs:
             raise ValueError("For now, you must specify saveFile so that the data is saved to disk instead of held in memory. This is because the amount of data is too large to hold in memory.")
         
-        if "saveFile" in kwargs and not kwargs["saveFile"].endswith(".jsonl"):
+        
+        if "saveFile" in kwargs and kwargs["saveFile"].endswith(".jsonl") or  kwargs["saveFile"].endswith(".jsonl.gz"):
             if not os.path.isfile(kwargs["saveFile"]):
                 makeEmptyJSONLFile(kwargs["saveFile"], compressed = kwargs["saveFile"].endswith(".gz"))
+        elif "saveFile" in kwargs and kwargs["saveFile"].endswith(".parquet"):
+            if not os.path.isfile(kwargs["saveFile"]):
+                schema = pa.schema([
+                    ("slug", pa.string()),
+                    ("marketID", pa.string()),
+                    ("bestAsk", pa.float64()),
+                    ("bestBid", pa.float64()),
+                    ("yesPrice", pa.float64()),
+                    ("noPrice", pa.float64()),
+                    ("yesReturn", pa.float64()),
+                    ("noReturn", pa.float64()),
+                    ("spread", pa.float64()),
+                    ("active", pa.bool_()),
+                    ("liquidity", pa.float64()),
+                    ("description", pa.string()),
+                    ("createdAt", pa.string()),
+                    ("startDate", pa.string()),
+                    ("endDate", pa.string()),
+                    ("status", pa.string()),
+                    ("type", pa.string()),
+                    ("orderMinSize", pa.float64()),
+                ])
+                makeEmptyParquetFile(kwargs["saveFile"], schema)
+        else:
+            raise ValueError("Unacceptable save file format")
         
         _params = {
             "limit": 500,
@@ -337,7 +365,7 @@ class PolymarketHandler:
         allEventCounter = 0
         counter = 0
         while res.status_code == 200 and "next_cursor" in jsonResponse and "next_cursor" in jsonResponse:
-            print(f"Fetching next page of markets... (Page {counter + 2}) | Total events fetched so far: {allEventCounter}")
+            print(f"Fetching next page of events... (Page {counter + 2}) | Total events fetched so far: {allEventCounter}")
             counter += 1
             
             _params["after_cursor"] = jsonResponse["next_cursor"]
@@ -360,9 +388,14 @@ class PolymarketHandler:
                     processedData = _processData(event)
                     processedList.append(processedData)
                 
-                # We do this so the script opens the file only once and appends to it, instead of 
-                # opening and closing the file for each event which would be very inefficient.
-                appendToJSONL(kwargs["saveFile"], processedList)
+                if "saveFile" in kwargs and kwargs["saveFile"].endswith(".jsonl"):
+                    # We do this so the script opens the file only once and appends to it, instead of 
+                    # opening and closing the file for each event which would be very inefficient.
+                    appendToJSONL(kwargs["saveFile"], processedList)
+                elif "saveFile" in kwargs and kwargs["saveFile"].endswith(".parquet"):
+                    # Reads the parquet file, appends to it then saves it. Its not memory efficient.
+                    appendToParquet(kwargs["saveFile"], processedList, schema)
+                
                 print(f"Liquidity: {jsonResponse.get('events', [])[0].get('liquidity', None)} -> {jsonResponse.get('events', [])[-1].get('liquidity', None)}")
                 print(f"endDate: {jsonResponse.get('events', [])[0].get('endDate', None)} -> {jsonResponse.get('events', [])[-1].get('endDate', None)}")
                     
@@ -596,7 +629,32 @@ class PolymarketHandler:
         if "saveFile" in kwargs and not kwargs["saveFile"].endswith(".jsonl"):
             if not os.path.isfile(kwargs["saveFile"]):
                 makeEmptyJSONLFile(kwargs["saveFile"], compressed = kwargs["saveFile"].endswith(".gz"))
-            
+        elif "saveFile" in kwargs and kwargs["saveFile"].endswith(".parquet"):
+            if not os.path.isfile(kwargs["saveFile"]):
+                schema = pa.schema([
+                    ("slug", pa.string()),
+                    ("marketID", pa.string()),
+                    ("bestAsk", pa.float64()),
+                    ("bestBid", pa.float64()),
+                    ("yesPrice", pa.float64()),
+                    ("noPrice", pa.float64()),
+                    ("yesReturn", pa.float64()),
+                    ("noReturn", pa.float64()),
+                    ("spread", pa.float64()),
+                    ("active", pa.bool_()),
+                    ("liquidity", pa.float64()),
+                    ("description", pa.string()),
+                    ("createdAt", pa.string()),
+                    ("startDate", pa.string()),
+                    ("endDate", pa.string()),
+                    ("status", pa.string()),
+                    ("type", pa.string()),
+                    ("orderMinSize", pa.float64()),
+                ])
+                makeEmptyParquetFile(kwargs["saveFile"], schema)
+        else:
+            raise ValueError("Unacceptable save file format")
+    
         _params = {
             "limit": 500,
             "active": active,

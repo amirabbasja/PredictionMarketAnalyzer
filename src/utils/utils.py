@@ -1,7 +1,12 @@
 # Utility functions
+from pprint import pprint
+
 import requests, aiohttp, json, os, gzip, sys
+
 from typing import Dict, List, Optional, Any, Union
 from enum import Enum
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # Used for compatibility with python 3.11 and below, which don't have StrEnum
 try:
@@ -119,21 +124,52 @@ async def sendRequest_Async(
 
 def makeEmptyJSONLFile(filePath: str, compressed: bool = True) -> None:
     """
-    Create an empty .jsonl or .jsonl.gz file if it doesn't exist.
+    Create an empty .jsonl or .jsonl.gz file if it doesn't exist. 
+    Returns False if the file already exists, otherwise True.
     
     Args:
         filePath: Path to the file (add .gz extension for compressed)
         compressed: Whether to create a compressed file
     """
-    if compressed and not filePath.endswith('.gz'):
-        filePath += '.gz'
+    try:
+        if compressed and not filePath.endswith('.gz'):
+            filePath += '.gz'
+        
+        os.makedirs(os.path.dirname(filePath), exist_ok=True)
+        
+        if not os.path.isfile(filePath):
+            opener = gzip.open if compressed else open
+            with opener(filePath, "wb" if compressed else "w", encoding=None if compressed else "utf-8"):
+                pass
+            
+            return True
+        else:
+            return False
+    except Exception as e:
+        print(e)
+        return False
+
+def makeEmptyParquetFile(filePath: str, schema: pa.Schema) -> None:
+    """
+    Create an empty .parquet file if it doesn't exist.
     
-    os.makedirs(os.path.dirname(filePath), exist_ok=True)
-    
-    if not os.path.isfile(filePath):
-        opener = gzip.open if compressed else open
-        with opener(filePath, "wb" if compressed else "w", encoding=None if compressed else "utf-8"):
-            pass
+    Args:
+        filePath: Path to the file (add .gz extension for compressed)
+        schema: Parquet schema
+    """
+    try:
+        os.makedirs(os.path.dirname(filePath), exist_ok=True)
+        if not os.path.isfile(filePath):
+            empty = pa.table({f: pa.array([], type=t) for f, t in zip(schema.names, schema.types)})
+            pq.write_table(empty, filePath)
+            
+            return True
+        else:
+            return False
+    except Exception as e:
+        print(e)
+        return False
+
 
 def readJSONL(filePath: str) -> List[Dict[str, Any]]:
     """
@@ -150,6 +186,18 @@ def readJSONL(filePath: str) -> List[Dict[str, Any]]:
     
     with opener(filePath, mode, encoding="utf-8") as f:
         return [json.loads(line) for line in f]
+
+def readParquet(filePath: str) -> List[Dict[str, Any]]:
+    """
+    Read a .parquet file and return a list of dictionaries.
+    
+    Args:
+        filePath: Path to the file
+    
+    Returns:
+        List of dictionaries read from the file, suitable to be imported into a Pandas DataFrame
+    """
+    return pq.read_table(filePath).to_pydict()
 
 def appendToJSONL(filePath: str, data: Union[list, Dict[str, Any]]) -> None:
     """
@@ -168,6 +216,28 @@ def appendToJSONL(filePath: str, data: Union[list, Dict[str, Any]]) -> None:
         elif isinstance(data, list):
             for item in data:
                 f.write(json.dumps(item) + "\n")
+
+def appendToParquet(filePath: str, data: Union[List[Dict[str, Any]], Dict[str, Any]], schema: Optional[pa.schema]) -> None:
+    """
+    Append data to a .parquet file.
+    
+    Args:
+        filePath: Path to the file
+        data: Dictionary or list of dictionaries to append
+        schema: Parquet schema
+    """
+    if isinstance(data, dict):
+        data = [data]
+    
+    newTable = pa.Table.from_pylist(data, schema = schema)
+    
+    if os.path.isfile(filePath):
+        existing = pq.read_table(filePath)
+        combined = pa.concat_tables([existing, newTable])
+        pq.write_table(combined, filePath)
+    else:
+        pq.write_table(newTable, filePath)
+
 
 def streamJsonlGz(filePath: str):
     """

@@ -1,5 +1,5 @@
 from src.handlers.polymarket import PolymarketHandler
-from src.utils.utils import readJSONL, humanReadableFileSize, Errors
+from src.utils.utils import readJSONL, humanReadableFileSize, Errors, readParquet
 from dotenv import load_dotenv
 from pathlib import Path
 import os, pprint, sys, json
@@ -17,7 +17,7 @@ handler = PolymarketHandler(
 
 if sys.argv[1] == "--getAllEvents":
     result = handler.getAllEvents(
-        saveFile = f"src/data/liveEvents_{int(datetime.now().timestamp())}.jsonl.gz", 
+        saveFile = f"src/data/liveEvents_{int(datetime.now().timestamp())}.parquet", 
         getMarkets = False,
         reqOptions = {
             # "liquidity_min": 10_000,
@@ -30,7 +30,7 @@ elif sys.argv[1] == "--getAllMarkets":
         getPriceData = True
         
     result = handler.getAllMarkets(
-        saveFile = f"src/data/liveMarkets_{int(datetime.now().timestamp())}.jsonl.gz", 
+        saveFile = f"src/data/liveMarkets_{int(datetime.now().timestamp())}.parquet", 
         getMarkets = True,
         getPriceData = getPriceData,
         reqOptions = {
@@ -124,8 +124,15 @@ elif sys.argv[1] == "--toCsv":
     
     print(f"File size: {humanReadableFileSize(filePath)}")
     
-    data = readJSONL(filePath)
-    print(f"Total events read: {len(data)}")
+    if filePath.endswith(".jsonl.gz") or filePath.endswith(".jsonl"):
+        data = readJSONL(filePath)
+    elif filePath.endswith(".parquet"):
+        data = readParquet(filePath)
+    else:
+        print("Unsupported file format.")
+        exit()
+    
+    print(f"Total items read: {len(data)}")
     
     df = pd.DataFrame(data)
     df.to_csv(f"src/data/{fileName}.csv", index=True)
@@ -135,7 +142,7 @@ elif sys.argv[1] == "--getAllTrades":
         toBlock = "latest",
         fromBlock = 0,
         blockBatchSize = 100,
-        parallelRequests = 10,
+        parallelRequests = 20,
         saveBlockRange = 100_000,
         decodeLogs = False
     )
