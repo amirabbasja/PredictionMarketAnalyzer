@@ -65,18 +65,107 @@ class PolymarketHandler:
         self.baseURL_CLOB = "https://clob.polymarket.com"
         
         # Polymarket contract addresses
+        self.exchange_CFT_v1 = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+        self.exchange_NegRiskCFT_v1 = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+        self.polymarket_v2_Creation_Block = 84902353 # Blocknumber for which v2 started working
         self.exchange_CFT_v2 = "0xE111180000d2663C0091e4f400237545B87B996B"
         self.exchange_NegRiskCFT_v2 = "0xe2222d279d744050d28e00520010520000310F59"
-        self.exchange_CFT_v1 = "0" # TODO
-        self.exchange_NegRiskCFT_v1 = "0" # TODO
         
         # Polymarket logs
+        self.exchange_CFT_v1_OrderFilled_topic0 = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
         self.exchange_CFT_v2_OrderFilled_topic0 = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
+        self.exchange_NEGRISK_v1_OrderFilled_topic0 = self.exchange_CFT_v1_OrderFilled_topic0
+        self.exchange_NEGRISK_v2_OrderFilled_topic0 = self.exchange_CFT_v2_OrderFilled_topic0
         
         # Polymarket contracts
         self.contract_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_CFT_v2, abi = loadABI("polygon", "polymarket_exchange_CFT_v2"))
         self.contract_Neg_Risk_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_NegRiskCFT_v2, abi = loadABI("polygon", "polymarket_exchange_neg_risk_CFT"))
-
+        
+        # Necessary data for decoding polymarket logs
+        self.CTF_V1_DATA_TYPES     = ["uint256", "uint256", "uint256", "uint256", "uint256"]
+        self.CTF_V1_DATA_NAMES     = ["makerAssetId", "takerAssetId", "maker_amount_filled", "taker_amount_filled", "fee"]
+        self.CTF_V2_DATA_TYPES     = ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"]
+        self.CTF_V2_DATA_NAMES     = ["side", "tokenId", "maker_amount_filled", "taker_amount_filled", "fee", "builder", "metadata"]
+        self.NEGRISK_V1_DATA_TYPES = ["uint256", "uint256", "uint256", "uint256", "uint256"]
+        self.NEGRISK_V1_DATA_NAMES = ["makerAssetId", "takerAssetId", "maker_amount_filled", "taker_amount_filled", "fee"]
+        self.NEGRISK_V2_DATA_TYPES = ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"]
+        self.NEGRISK_V2_DATA_NAMES = ["side", "tokenId", "maker_amount_filled", "taker_amount_filled", "fee", "builder", "metadata"]
+        
+        # Necessary schemas for saving data in parquet/sql
+        self.eventsSchema = pa.schema([
+            ("slug", pa.string()),
+            ("marketID", pa.string()),
+            ("bestAsk", pa.float64()),
+            ("bestBid", pa.float64()),
+            ("yesPrice", pa.float64()),
+            ("noPrice", pa.float64()),
+            ("yesReturn", pa.float64()),
+            ("noReturn", pa.float64()),
+            ("spread", pa.float64()),
+            ("active", pa.bool_()),
+            ("liquidity", pa.float64()),
+            ("description", pa.string()),
+            ("createdAt", pa.string()),
+            ("startDate", pa.string()),
+            ("endDate", pa.string()),
+            ("status", pa.string()),
+            ("type", pa.string()),
+            ("orderMinSize", pa.float64()),
+        ])
+        self.marketsSchema = pa.schema([
+            ("slug", pa.string()),
+            ("marketID", pa.string()),
+            ("bestAsk", pa.float64()),
+            ("bestBid", pa.float64()),
+            ("outcome_0", pa.string()),
+            ("outcome_0_ID", pa.string()),
+            ("outcome_0_price", pa.float64()),
+            ("outcome_0_return", pa.float64()),
+            ("outcome_1", pa.string()),
+            ("outcome_1_ID", pa.string()),
+            ("outcome_1_price", pa.float64()),
+            ("outcome_1_return", pa.float64()),
+            ("spread", pa.float64()),
+            ("volumeNum", pa.float64()),
+            ("volume1yr", pa.float64()),
+            ("volumeAmm", pa.float64()),
+            ("volumeClob", pa.float64()),
+            ("takerBaseFee", pa.float64()),
+            ("makerBaseFee", pa.float64()),
+            ("active", pa.bool_()),
+            ("archived", pa.bool_()),
+            ("closed", pa.bool_()),
+            ("liquidity", pa.float64()),
+            ("liquidityNum", pa.float64()),
+            ("description", pa.string()),
+            ("createdAt", pa.string()),
+            ("startDate", pa.string()),
+            ("endDate", pa.string()),
+            ("daysTillExpiry", pa.float64()),
+            ("hoursTillExpiry", pa.float64()),
+            ("question", pa.string()),
+            ("questionID", pa.string()),
+            ("orderMinSize", pa.float64()),
+        ])
+        self.tradesSchema = pa.schema([
+            ("block_number", pa.int64()),
+            ("block_timestamp", pa.int64()),
+            ("tx_hash", pa.string()),
+            ("platform_name", pa.string()),
+            ("platform_version", pa.string()),
+            ("taker", pa.string()),
+            ("maker", pa.string()),
+            ("token_id", pa.string()),
+            ("slug", pa.string()),
+            ("condition_id", pa.string()),
+            ("price", pa.float64()),
+            ("taker_side", pa.string()),
+            ("amount", pa.float64()),
+            ("amount_asset", pa.string()),
+            ("fee", pa.float64()),
+            ("fee_asset", pa.string()),
+            ("extra_data", pa.string()),
+        ])
     def __requireWeb3APIkey(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
@@ -84,6 +173,132 @@ class PolymarketHandler:
                 raise ValueError("This method requires a Web3 API key. Please provide one during initialization.")
             return func(self, *args, **kwargs)
         return wrapper
+
+    def _CTF_V1_OrderFilled_fastDecode(self, log):
+        """
+        Decodes CTF Exchange V1 OrderFilled events.
+        Direction (buy/sell) is inferred: if makerAssetId == 0 the maker is selling
+        USDC to buy the outcome token (BUY side); otherwise SELL side.
+        """
+        raw = bytes(log["data"])
+        decoded_data = decode(self.CTF_V1_DATA_TYPES, raw)
+        result = dict(zip(self.CTF_V1_DATA_NAMES, decoded_data))
+
+        result["orderHash"] = log["topics"][1]
+        result["maker"]     = "0x" + log["topics"][2].hex()[-40:]
+        result["taker"]     = "0x" + log["topics"][3].hex()[-40:]
+
+        # Derive tokenId and side from the asset pair.
+        # Convention: assetId == 0 means USDC (the collateral leg).
+        if result["makerAssetId"] == 0:
+            token_id = str(result["takerAssetId"])
+            side = 0  # BUY  – maker pays USDC, receives outcome token
+        else:
+            token_id = str(result["makerAssetId"])
+            side = 1  # SELL – maker pays outcome token, receives USDC
+
+        return {
+            "token_id":            token_id,
+            "taker_side":               side,
+            "maker_amount_filled":  result["maker_amount_filled"],
+            "taker_amount_filled":  result["taker_amount_filled"],
+            "order_hash":          "0x"+str(result["orderHash"].hex()),
+            "taker":              Web3.to_checksum_address(result["taker"]),
+            "maker":              Web3.to_checksum_address(result["maker"]),
+            "fee":                result["fee"],
+            "platform_name":          "polymarket",
+            "platform_version":    "ctf_v1"
+        }
+    
+    def _CTF_V2_OrderFilled_fastDecode(self, log):
+        """
+        For decoding the CTF exchange (V2) events more quickly.
+        """
+        # Decode non-indexed fields from data
+        # log["data"] is already bytes in web3.py — no need for .hex() / fromhex()
+        raw = bytes(log["data"])
+        decoded_data = decode(self.CTF_V2_DATA_TYPES, raw)
+        result = dict(zip(self.CTF_V2_DATA_NAMES, decoded_data))
+
+        # Decode indexed fields from topics[1], topics[2], topics[3]
+        # topics[0] is the event signature hash
+        result["orderHash"] = log["topics"][1]           # already bytes32
+        result["maker"]     = "0x" + log["topics"][2].hex()[-40:]  # last 20 bytes → address
+        result["taker"]     = "0x" + log["topics"][3].hex()[-40:]  # last 20 bytes → address
+        
+        returnDict = {
+            "token_id":            str(result["tokenId"]),
+            "taker_side":               result["side"],
+            "maker_amount_filled":  result["maker_amount_filled"],
+            "taker_amount_filled":  result["taker_amount_filled"],
+            "order_hash":          "0x"+str(result["orderHash"].hex()),
+            "taker":              Web3.to_checksum_address(result["taker"]),
+            "maker":              Web3.to_checksum_address(result["maker"]),
+            "fee":                result["fee"],
+            "platform_name":          "polymarket",
+            "platform_version":    "ctf_v2"
+        }
+
+        return returnDict
+
+    def _NEGRISK_V1_OrderFilled_fastDecode(self, log):
+        """
+        Decodes NegRisk CTF Exchange V1 OrderFilled events.
+        Same layout as CTF V1; direction inferred from the zero-asset leg.
+        """
+        raw = bytes(log["data"])
+        decoded_data = decode(self.NEGRISK_V1_DATA_TYPES, raw)
+        result = dict(zip(self.NEGRISK_V1_DATA_NAMES, decoded_data))
+
+        result["orderHash"] = log["topics"][1]
+        result["maker"]     = "0x" + log["topics"][2].hex()[-40:]
+        result["taker"]     = "0x" + log["topics"][3].hex()[-40:]
+
+        if result["makerAssetId"] == 0:
+            token_id = str(result["takerAssetId"])
+            side = 0  # BUY
+        else:
+            token_id = str(result["makerAssetId"])
+            side = 1  # SELL
+
+        return {
+            "token_id":            token_id,
+            "taker_side":               side,
+            "maker_amount_filled":  result["maker_amount_filled"],
+            "taker_amount_filled":  result["taker_amount_filled"],
+            "order_hash":          "0x"+str(result["orderHash"].hex()),
+            "taker":              Web3.to_checksum_address(result["taker"]),
+            "maker":              Web3.to_checksum_address(result["maker"]),
+            "fee":                result["fee"],
+            "platform_name":          "polymarket",
+            "platform_version":    "negrisk_v1"
+        }
+
+    def _NEGRISK_V2_OrderFilled_fastDecode(self, log):
+        """
+        Decodes NegRisk CTF Exchange V2 OrderFilled events.
+        Identical wire format to CTF V2; kept separate for contract-source clarity.
+        """
+        raw = bytes(log["data"])
+        decoded_data = decode(self.NEGRISK_V2_DATA_TYPES, raw)
+        result = dict(zip(self.NEGRISK_V2_DATA_NAMES, decoded_data))
+
+        result["orderHash"] = log["topics"][1]
+        result["maker"]     = "0x" + log["topics"][2].hex()[-40:]
+        result["taker"]     = "0x" + log["topics"][3].hex()[-40:]
+
+        return {
+            "token_id":            str(result["tokenId"]),
+            "taker_side":               result["side"],
+            "maker_amount_filled":  result["maker_amount_filled"],
+            "taker_amount_filled":  result["taker_amount_filled"],
+            "order_hash":          "0x"+str(result["orderHash"].hex()),
+            "taker":              Web3.to_checksum_address(result["taker"]),
+            "maker":              Web3.to_checksum_address(result["maker"]),
+            "fee":                result["fee"],
+            "platform_name":          "polymarket",
+            "platform_version":    "negrisk_v2"
+        }
 
     async def getPriceHistory_async(self, marketID: str, outcomeIDs: tuple[str, str], **kwargs):
         """
@@ -314,26 +529,7 @@ class PolymarketHandler:
                 makeEmptyJSONLFile(kwargs["saveFile"], compressed = kwargs["saveFile"].endswith(".gz"))
         elif "saveFile" in kwargs and kwargs["saveFile"].endswith(".parquet"):
             if not os.path.isfile(kwargs["saveFile"]):
-                schema = pa.schema([
-                    ("slug", pa.string()),
-                    ("marketID", pa.string()),
-                    ("bestAsk", pa.float64()),
-                    ("bestBid", pa.float64()),
-                    ("yesPrice", pa.float64()),
-                    ("noPrice", pa.float64()),
-                    ("yesReturn", pa.float64()),
-                    ("noReturn", pa.float64()),
-                    ("spread", pa.float64()),
-                    ("active", pa.bool_()),
-                    ("liquidity", pa.float64()),
-                    ("description", pa.string()),
-                    ("createdAt", pa.string()),
-                    ("startDate", pa.string()),
-                    ("endDate", pa.string()),
-                    ("status", pa.string()),
-                    ("type", pa.string()),
-                    ("orderMinSize", pa.float64()),
-                ])
+                schema = self.eventsSchema
                 makeEmptyParquetFile(kwargs["saveFile"], schema)
         else:
             raise ValueError("Unacceptable save file format")
@@ -575,7 +771,7 @@ class PolymarketHandler:
             
             # Event-level data
             returnData["active"] = data.get("active", None)
-            returnData["marketID"] = data.get("id", "")
+            returnData["marketID"] = data.get("id", "NO_ID")
             returnData["archived"] = data.get("archived", None)
             returnData["closed"] = data.get("closed", None)
             returnData["createdAt"] = _createdAt.isoformat() if _createdAt is not None else None
@@ -583,17 +779,22 @@ class PolymarketHandler:
             returnData["endDate"] = _endDate.isoformat() if _endDate is not None else None
             returnData["daysTillExpiry"] =  _diffDays
             returnData["hoursTillExpiry"] = _diffHours
-            returnData["description"] = data.get("description", "").replace('\n', ' ').replace('\r', ' ') if data.get("description", None) is not None else None # Deleted due to storage issues
-            returnData["slug"] = data.get("slug", None)
-            returnData["spread"] = data.get("spread", None)
-            returnData["takerBaseFee"] = data.get("takerBaseFee", None)
-            returnData["makerBaseFee"] = data.get("makerBaseFee", None)
-            returnData["liquidity"] = data.get("liquidity", None)
-            returnData["liquidityNum"] = data.get("liquidityNum", None)
-            returnData["volumeNum"] = data.get("volume", None)
-            returnData["volume1yr"] = data.get("volume1yr", None)
-            returnData["volumeAmm"] = data.get("volumeAmm", None)
-            returnData["volumeClob"] = data.get("volumeClob", None)
+            returnData["description"] = data.get("description", "NO_DESCRIPTION").replace('\n', ' ').replace('\r', ' ') if data.get("description", None) is not None else "NO_DESCRIPTION" # Deleted due to storage issues
+            returnData["question"] = data.get("question", "NO_QUESTION")
+            returnData["questionID"] = data.get("questionID", "NO_QUESTION_ID")
+            returnData["slug"] = data.get("slug", "NO_SLUG")
+            returnData["spread"] = float(data.get("spread", -1))
+            returnData["takerBaseFee"] = float(data.get("takerBaseFee", -1))
+            returnData["makerBaseFee"] = float(data.get("makerBaseFee", -1))
+            returnData["liquidity"] = float(data.get("liquidity", -1))
+            returnData["liquidityNum"] = float(data.get("liquidityNum", -1))
+            returnData["volumeNum"] = float(data.get("volume", -1))
+            returnData["volume1yr"] = float(data.get("volume1yr", -1))
+            returnData["volumeAmm"] = float(data.get("volumeAmm", -1))
+            returnData["volumeClob"] = float(data.get("volumeClob", -1))
+            returnData["bestBid"] = float(data.get("bestBid", -1))
+            returnData["bestAsk"] = float(data.get("bestAsk", -1))
+            returnData["orderMinSize"] = float(data.get("orderMinSize", -1))
             
             # Market-level data
             returnData["eventsCount"] = len(data.get("events", [])) if "events" in data and isinstance(data["events"], list) else 0
@@ -616,6 +817,10 @@ class PolymarketHandler:
                 returnData["outcome_1_price"] = float(outcomePrices[1])
                 returnData["outcome_1_return"] = round((1 - returnData["outcome_1_price"]) / returnData["outcome_1_price"] * 100, 2) if returnData["outcome_1_price"] is not None and returnData["outcome_1_price"] != 0 else None
                 returnData["outcome_1_ID"] = str(tokenIDs[1]) if len(tokenIDs) > 1 else ""
+                
+                # Outcome descriptions
+                returnData["outcome_0"] = outcomes[0] if outcomes else "NO_NAME"
+                returnData["outcome_1"] = outcomes[1] if outcomes else "NO_NAME"
             
             if getPriceData and returnData.get("outcome_0_ID", None) is not None and returnData.get("outcome_1_ID", None) is not None:
                 priceHistory = self.getPriceHistory_sync(returnData["marketID"], (returnData["outcome_0_ID"], returnData["outcome_1_ID"]), interval="all")
@@ -626,32 +831,15 @@ class PolymarketHandler:
         if "saveFile" not in kwargs:
             raise ValueError("For now, you must specify saveFile so that the data is saved to disk instead of held in memory. This is because the amount of data is too large to hold in memory.")
         
-        if "saveFile" in kwargs and not kwargs["saveFile"].endswith(".jsonl"):
+        if "saveFile" in kwargs and (kwargs["saveFile"].endswith(".jsonl") or kwargs["saveFile"].endswith(".jsonl.gz")):
             if not os.path.isfile(kwargs["saveFile"]):
                 makeEmptyJSONLFile(kwargs["saveFile"], compressed = kwargs["saveFile"].endswith(".gz"))
         elif "saveFile" in kwargs and kwargs["saveFile"].endswith(".parquet"):
             if not os.path.isfile(kwargs["saveFile"]):
-                schema = pa.schema([
-                    ("slug", pa.string()),
-                    ("marketID", pa.string()),
-                    ("bestAsk", pa.float64()),
-                    ("bestBid", pa.float64()),
-                    ("yesPrice", pa.float64()),
-                    ("noPrice", pa.float64()),
-                    ("yesReturn", pa.float64()),
-                    ("noReturn", pa.float64()),
-                    ("spread", pa.float64()),
-                    ("active", pa.bool_()),
-                    ("liquidity", pa.float64()),
-                    ("description", pa.string()),
-                    ("createdAt", pa.string()),
-                    ("startDate", pa.string()),
-                    ("endDate", pa.string()),
-                    ("status", pa.string()),
-                    ("type", pa.string()),
-                    ("orderMinSize", pa.float64()),
-                ])
-                makeEmptyParquetFile(kwargs["saveFile"], schema)
+                parquetSchema = self.marketsSchema
+                makeEmptyParquetFile(kwargs["saveFile"], parquetSchema)
+            else:
+                parquetSchema = pq.read_schema(kwargs["saveFile"])
         else:
             raise ValueError("Unacceptable save file format")
     
@@ -685,6 +873,7 @@ class PolymarketHandler:
         # Continue getting the rest with cursor pagination
         allEventCounter = 0 if checkpoint is None else checkpoint[1]
         counter = 0 
+        processedList = []
         while res.status_code == 200 and "next_cursor" in jsonResponse and "next_cursor" in jsonResponse:
             print(f"Fetching next page of markets... (Page {counter + 2}) | Total markets fetched so far: {allEventCounter}")
             counter += 1
@@ -699,19 +888,11 @@ class PolymarketHandler:
             try:
                 jsonResponse = res.json()
                 allEventCounter += len(jsonResponse.get("markets", []))
-                
-                # Save the progress in a file
-                saveProgress(kwargs.get("saveFile"), {
-                    "next_cursor": jsonResponse.get("next_cursor"),
-                    "eventCount": allEventCounter,
-                    "timestamp": int(datetime.datetime.now().timestamp())
-                })
 
                 if not isinstance(jsonResponse, dict):
                     print(f"Unexpected JSON type: {type(jsonResponse)}")
                     break
                 
-                processedList = []
                 for event in tqdm(jsonResponse.get("markets", []), desc="Processing markets"):
                     processedData = _processData(event)
                     
@@ -720,19 +901,49 @@ class PolymarketHandler:
                     
                     processedList.append(processedData)
                 
+                if "jsonl" in kwargs["saveFile"] or "jsonl.gz" in kwargs["saveFile"] :
+                    # We do this so the script opens the file only once and appends to it, instead of 
+                    # opening and closing the file for each event which would be very inefficient.
+                    appendToJSONL(kwargs["saveFile"], processedList)
+                    processedList = []
                 
-                # We do this so the script opens the file only once and appends to it, instead of 
-                # opening and closing the file for each event which would be very inefficient.
-                appendToJSONL(kwargs["saveFile"], processedList)
-
-                print(f"   {_params['order']}: {jsonResponse.get('markets', [])[-1].get(_params['order'], None)} -> {jsonResponse.get('markets', [])[0].get(_params['order'], None)} | ")
+                    # Save the progress in a file
+                    saveProgress(kwargs.get("saveFile"), {
+                        "next_cursor": jsonResponse.get("next_cursor"),
+                        "eventCount": allEventCounter,
+                        "timestamp": int(datetime.datetime.now().timestamp())
+                    })
+                elif "parquet" in kwargs["saveFile"]:
+                    # Saving parquet files is memory-intensive, therefore we lower the frequency of
+                    # writing into hard disk
+                    if 2_000 <= len(processedList):
+                        # Appends to a parquet database. Its important to know that its not memory efficient 
+                        # and needs loading the entire database before adding to it.
+                        print("Writing new data to file...")
+                        appendToParquet(kwargs["saveFile"], processedList, parquetSchema, True)
+                        processedList = []
+                        
+                        # Save the progress in a file
+                        saveProgress(kwargs.get("saveFile"), {
+                            "next_cursor": jsonResponse.get("next_cursor"),
+                            "eventCount": allEventCounter,
+                            "timestamp": int(datetime.datetime.now().timestamp())
+                        })
+                
+                print(f"Acquired {len(processedList)} data | Total: {allEventCounter}")
                     
                 if jsonResponse.get("next_cursor", None) is None:
+                    # Save before exiting
+                    if "parquet" in kwargs["saveFile"] and len(processedList) != 0:
+                        appendToParquet(kwargs["saveFile"], processedList, parquetSchema, True)
+                    
+                    print("No data for next page was sent from the exchange. Assuming the end of fetch.")
                     break
                 else:
-                    # Add the next cursor to the last item of the batch so that if process ran into 
-                    # errors, we could pickup where we left off
-                    processedList[-1]["next_cursor"] = jsonResponse["next_cursor"]
+                    # # Add the next cursor to the last item of the batch so that if process ran into 
+                    # # errors, we could pickup where we left off
+                    # processedList[-1]["next_cursor"] = jsonResponse["next_cursor"]
+                    pass
             except Exception as e:
                 raise e
 
@@ -792,8 +1003,49 @@ class PolymarketHandler:
                 "msg": f"{e}"
             }
 
+    def getAllTrades_Graph(
+        self, 
+        saveLocation: str, 
+        apiKey: str, 
+        fromBlock: Union[int, None], 
+        toBlock: Union[int, None, str], 
+        maxFileSiz: float = 0.8,
+        blockBatch: float = 1000
+    ):
+        """
+        Using a graphQL API, gets all trades for polymarket v2 and saves them into a parquet database.
+        
+        
+        """
+        # Link: https://thegraph.com/explorer/subgraphs/B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR?view=Query&chain=arbitrum-one
+        _polymarketV2_subgraphID = "B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR"
+        
+        if toBlock == "latest":
+            toBlock = self.w3["polygon"].eth.block_number
+        
+        if fromBlock is None:
+            fromBlock = self.polymarket_v2_Creation_Block
+        
+        
+        # Make the directory if not there
+        if not os.path.exists(saveLocation):
+            print("Making a new directory for saving the trade data since it does not exist.")
+            os.makedirs(saveLocation)
+        
+        # Get the file to append trades into
+        idx = 1
+        for file in os.listdir(saveLocation):
+            if "polymarket_trades_pt_" in file:
+                _idx = int(file.replace("polymarket_trades_pt_","").replace(".parquet", ""))
+                if idx < _idx:
+                    idx = _idx
+        
+        
+        
+        print(idx)
+
     @__requireWeb3APIkey
-    def getAllTrades(
+    def getAllTrades_RPC(
             self, 
             saveLocation: str, 
             fromBlock: Union[int, None], 
@@ -801,47 +1053,53 @@ class PolymarketHandler:
             blockBatchSize: int = 1000,
             parallelRequests: int = 1,
             saveBlockRange: int = None, 
-            decodeLogs: bool = True
+            decodeLogs: bool = True,
+            maxFileSize_GB: float = 0.8,
         ):
         """
         Using a web3 RPC, gets all trades for polymarket v1 and v2 and saves them into a parquet database.
+        Support parallel requests to the RPC for increased speed.
         
-        saveLocation (str): The directory to save the parquet databases
+        The trades are saved in a parquet file, located at 'saveLocation' directory. the file names have
+        the following pattern: polymarket_trades_pt_<xxxx>.parquet
+        
+        Each file's size is limited by 'maxFileSiz' argument. This choice was made to meet different RAM 
+        constraints of different machines
+        
+        Args:
+            saveLocation (str): The directory to save the parquet databases
         """
         
-        CTF_V2_DATA_TYPES = ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"]
-        CTF_V2_DATA_NAMES = ["side", "tokenId", "makerAmountFilled", "takerAmountFilled", "fee", "builder", "metadata"]
-
-        def _CTF_V2_fastDecode(log):
+        def _fetchLogs(args: tuple):
             """
-            For decoding the CTF exchange (V2) events more quickly.
-            """
-            # Decode non-indexed fields from data
-            # log["data"] is already bytes in web3.py — no need for .hex() / fromhex()
-            raw = bytes(log["data"])
-            decoded_data = decode(CTF_V2_DATA_TYPES, raw)
-            result = dict(zip(CTF_V2_DATA_NAMES, decoded_data))
+            Fetches logs for a polymarket contract
 
-            # Decode indexed fields from topics[1], topics[2], topics[3]
-            # topics[0] is the event signature hash
-            result["orderHash"] = log["topics"][1]           # already bytes32
-            result["maker"]     = "0x" + log["topics"][2].hex()[-40:]  # last 20 bytes → address
-            result["taker"]     = "0x" + log["topics"][3].hex()[-40:]  # last 20 bytes → address
+            Args:
+                args (tuple): First two indexes indicate start and end of the block range, and the third is for exchangeType
+                    blockRange (int, int): The block range to get the data from    
+                    exchangeType (str): The market type (Acceptable values: ctf_v1, ctf_v2, negrisk_v1, negrisk_v2)
+            """
+            fromBlock, toBlock, exchangeType = args
+            if exchangeType not in ["ctf_v1", "ctf_v2", "negrisk_v1", "negrisk_v2"]:
+                raise ValueError(f"Invalid market type: {exchangeType}. Acceptable values are: ctf_v1, ctf_v2, negrisk_v1, negrisk_v2")
             
-            returnDict = {
-                "tokenId": str(result["tokenId"]),
-                "side": result["side"],
-                "makerAmountFilled": result["makerAmountFilled"],
-                "takerAmountFilled": result["takerAmountFilled"],
-                "orderHash": result["orderHash"].hex(),
-                "taker": result["taker"],
-                "maker": result["maker"],
-            }
-
-            return returnDict
-        
-        def fetchLogs(blockRange):
-            fromBlock, toBlock = blockRange
+            contractAddress = None
+            topic0 = None
+            if exchangeType == "ctf_v1":
+                contractAddress = self.exchange_CFT_v1
+                topic0 = self.exchange_CFT_v1_OrderFilled_topic0
+            elif exchangeType == "ctf_v2":
+                contractAddress = self.exchange_CFT_v2
+                topic0 = self.exchange_CFT_v2_OrderFilled_topic0
+            elif exchangeType == "negrisk_v1":
+                contractAddress = self.exchange_NegRiskCFT_v1
+                topic0 = self.exchange_CFT_v1_OrderFilled_topic0
+            elif exchangeType == "negrisk_v2":
+                contractAddress = self.exchange_NegRiskCFT_v2
+                topic0 = self.exchange_CFT_v2_OrderFilled_topic0
+            else: 
+                raise ValueError(f"Invalid market type: {exchangeType}. Acceptable values are: ctf_v1, ctf_v2, negrisk_v1, negrisk_v2")
+            
             try:
                 maxRetries = 5
                 _delay = 2  # seconds
@@ -849,15 +1107,13 @@ class PolymarketHandler:
                 for attempt in range(maxRetries):
                     try:
                         # Get logs for polymarket CTF v2 exchange
-                        # print(f"Sent request for range {fromBlock}-{toBlock} (attempt {attempt + 1}/{maxRetries})")
                         logs = self.w3["polygon"].eth.get_logs({
-                            "address": self.exchange_CFT_v2,
+                            "address": contractAddress,
                             "fromBlock": fromBlock,
                             "toBlock": toBlock,
-                            "topics": [self.exchange_CFT_v2_OrderFilled_topic0]
+                            "topics": [topic0]
                         })
-                        # print("Got", len(logs), "logs:", logs[0]["blockNumber"], "-", logs[-1]["blockNumber"])
-                        return logs
+                        return logs, exchangeType
 
                     except Exception as e:
                         is_last_attempt = attempt == maxRetries - 1
@@ -874,18 +1130,33 @@ class PolymarketHandler:
                         else:
                             # Non-connection error, or out of retries
                             print(f"Error fetching range {fromBlock}-{toBlock}: {e}")
-                            return []
+                            return [], exchangeType
 
             except Exception as e:
                 print(f"Unexpected error fetching range {fromBlock}-{toBlock}: {e}")
-                return []
+                return [], exchangeType
 
+        def _saveDataToParquet(saveDir: str, idx: int, data) -> None:
+            _fileName = os.path.join(saveDir, f"polymarket_trades_pt_{idx:03d}.parquet")
+            if not os.path.exists(_fileName):
+                # Make an empty parquet file and append to it
+                makeEmptyParquetFile(_fileName, self.tradesSchema)
+                
+            appendToParquet(_fileName, data, self.tradesSchema, True)
+                
+            
         # Make the directory if not there
         if not os.path.exists(saveLocation):
             print("Making a new directory for saving the trade data since it does not exist.")
             os.makedirs(saveLocation)
-
-        # TODO: Check for existing trades
+        
+        # Get the file to append trades into
+        saveFileIDX = 1
+        for file in os.listdir(saveLocation):
+            if "polymarket_trades_pt_" in file:
+                _idx = int(file.replace("polymarket_trades_pt_","").replace(".parquet", ""))
+                if saveFileIDX < _idx:
+                    saveFileIDX = _idx
         
         if toBlock == "latest":
             toBlock = self.w3["polygon"].eth.block_number
@@ -894,89 +1165,128 @@ class PolymarketHandler:
         # Get the logs
         allLogs = []
         
-        _retries = 0
-        batchEnd = toBlock
-        _startTime = time.time()
-        while fromBlock <= batchEnd:
-            if 10 < _retries:
+        retries = 0
+        batchStart = fromBlock
+        startTime = time.time()
+        acquiredBlocks = 0
+        while batchStart <= toBlock:
+            # Check the save file size - If the file size is higehr than maxFileSize_GB, aim to save in a new file
+            if os.path.exists(os.path.join(saveLocation, f"polymarket_trades_pt_{saveFileIDX:03d}.parquet")):
+                if maxFileSize_GB < getSizeInGB(os.path.join(saveLocation, f"polymarket_trades_pt_{saveFileIDX:03d}.parquet")):
+                    saveFileIDX += 1
+            
+            if 10 < retries:
                 raise Exception("Max retries reached. Aborting")
             
-            parquetSaveBlockRange = [None, None]
-            batchStart = max(batchEnd - blockBatchSize * parallelRequests + 1, fromBlock)
+            batchEnd = min(batchStart + blockBatchSize * parallelRequests - 1, toBlock)
             try:
-                print(f"Fetching logs from block {batchStart} to {batchEnd}. Remaining blocks: {batchEnd - fromBlock} ({(batchEnd - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)", end = "\r")
-                parquetSaveBlockRange[0] = batchStart
-                if parquetSaveBlockRange[1] is None:
-                    parquetSaveBlockRange[1] = batchEnd
+                print(f"Fetching logs from block {batchStart:,} to {batchEnd:,}. Remaining blocks: {toBlock - batchEnd:,} (Fetched {(batchEnd - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)")
                 
-                logs = []
+                # Make parallel requests for 4 types of polymarket contracts and get their "OrderFilled" events
+                logs = {"ctf_v1": [], "ctf_v2": [], "negrisk_v1": [], "negrisk_v2": []}
                 _batchStartTime = time.time()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=parallelRequests) as executor:
-                    subBatch = range(batchEnd, batchStart - 1, -blockBatchSize)
-                    blockRanges = []
-                    for _batch in subBatch:
-                        subBatchEnd = _batch
-                        subBatchStart = max(subBatchEnd - blockBatchSize + 1, fromBlock)
-                        blockRanges.append((subBatchStart, subBatchEnd))
-                    results = executor.map(fetchLogs, blockRanges)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    _args = [
+                        (*(batchStart, batchEnd), "ctf_v1"),
+                        (*(batchStart, batchEnd), "ctf_v2"),
+                        (*(batchStart, batchEnd), "negrisk_v1"),
+                        (*(batchStart, batchEnd), "negrisk_v2"),
+                    ]
+                    results = executor.map(_fetchLogs, _args)
                     
-                    # 4. Aggregate the results into a single list
-                    for _logs in results:
-                        logs.extend(_logs)
-                print(f"Fetched {toBlock - batchStart + 1} blocks so far                                                                                                               ")
+                    # Aggregate the results into a single list
+                    for (_logs, version) in results:
+                        logs[version].extend(_logs)
+
+                acquiredBlocks += batchEnd - batchStart
+                print(f"Logs count in batch: ctf_v1:{len(logs['ctf_v1'])} | negrisk_v1:{len(logs['negrisk_v1'])} | ctf_v2:{len(logs['ctf_v2'])} | negrisk_v2:{len(logs['negrisk_v2'])}")
+                print(f"Fetched {batchEnd - fromBlock + 1} blocks so far\n")
                 
-                for log in tqdm(logs, desc="Decoding OrderFilled logs", leave = False):
-                    # Decode the log
-                    if decodeLogs:
-                        decoded = _CTF_V2_fastDecode(log)
-                    else:
-                        decoded = {
-                            "log": log,
-                            "method": "OrderFilled",
-                            "topic0": self.exchange_CFT_v2_OrderFilled_topic0,
-                            "contract": "CTF_V2"
-                        }
-                    
-                    # Add block data to the transaction
-                    decoded["blockTimestamp"] = str(int(log["blockTimestamp"].replace("0x", ""), 16))
-                    decoded["blockNumber"] = str(log["blockNumber"])
-                    
-                    allLogs.append(decoded)
-                print(f"Gathered {len(allLogs)} logs so far | size: {getObjectSize(allLogs)} | Cumulative time: {time.time() - _startTime:.2f}s | Batch time: {time.time() - _batchStartTime:.2f}s")
+                for version in list(logs.keys()):
+                    for log in tqdm(logs[version], desc=f"Decoding OrderFilled logs for {version}", leave = False):
+                        # Decode the log
+                        decoded = {}
+                        if decodeLogs:
+                            if   version == "ctf_v1":
+                                decoded = self._CTF_V1_OrderFilled_fastDecode(log)
+                            elif version == "ctf_v2":
+                                decoded = self._CTF_V2_OrderFilled_fastDecode(log)
+                            elif version == "negrisk_v1":
+                                decoded = self._NEGRISK_V1_OrderFilled_fastDecode(log)
+                            elif version == "negrisk_v2":
+                                decoded = self._NEGRISK_V1_OrderFilled_fastDecode(log)
+                        else:
+                            if   version == "ctf_v1":
+                                topic0 = self.exchange_CFT_v1_OrderFilled_topic0
+                            elif version == "ctf_v2":
+                                topic0 = self.exchange_CFT_v2_OrderFilled_topic0
+                            elif version == "negrisk_v1":
+                                topic0 = self.exchange_CFT_v1_OrderFilled_topic0
+                            elif version == "negrisk_v2":
+                                topic0 = self.exchange_CFT_v2_OrderFilled_topic0
+                                
+                            decoded = {
+                                "log": log,
+                                "method": "OrderFilled",
+                                "topic0": topic0,
+                                "contract": version
+                            }
+                        
+                        # Add block data to the transaction
+                        decoded["tx_hash"] = f"0x{log["transactionHash"].hex()}"
+                        decoded["block_timestamp"] = int(int(log["blockTimestamp"].replace("0x", ""), 16))
+                        decoded["block_number"] = int(log["blockNumber"])
+                        
+                        # Do the necessary calculations
+                        decoded["amount"] =  decoded["taker_amount_filled"] / 1e6
+                        decoded["amount_asset"] = "USDC"
+                        decoded["fee"] =  decoded["fee"] / 1e6
+                        decoded["fee_asset"] = "USDC"
+                        if decoded["maker_amount_filled"] > 0:
+                            price = decoded["taker_amount_filled"] / decoded["maker_amount_filled"]
+                        else:
+                            price = 0
+                        decoded["taker_side"] = "BUY" if decoded["taker_side"] == 0 else "SELL"
+                        decoded["price"] = price
+                        decoded["extra_data"] = json.dumps({
+                            "negative_risk": True if version == "negrisk_v1" or version == "negrisk_v2" else False,
+                            "order_hash": decoded["order_hash"],
+                            "maker_amount_filled": decoded["maker_amount_filled"],
+                            "taker_amount_filled": decoded["taker_amount_filled"]
+                        })
+                        
+                        allLogs.append(decoded)
+                print(f"Gathered {len(allLogs):,} logs so far | size: {getObjectSize(allLogs)} | Cumulative time: {time.time() - startTime:.2f}s | Batch time: {time.time() - _batchStartTime:.2f}s")
 
                 # Save the dataframe as parquet
                 if saveBlockRange is not None:
-                    if saveBlockRange <= parquetSaveBlockRange[1] - parquetSaveBlockRange[0]:
-                        tmpDF = pd.DataFrame(allLogs)
-                        tmpDF.to_parquet(os.path.join(saveLocation, f"trades_{parquetSaveBlockRange[0]}_{parquetSaveBlockRange[1]}.parquet"), index=False)
-                        parquetSaveBlockRange = [None, None]
+                    if saveBlockRange <= acquiredBlocks:
+                        _saveDataToParquet(saveLocation, saveFileIDX, allLogs)
 
-                        # Clean memory
-                        del allLogs, tmpDF
+                        # Clean up
+                        del allLogs
                         gc.collect()
                         allLogs = []
-                        print("df size", tmpDF.memory_usage(deep=True).sum() / (1024**2), "MB")
+                        acquiredBlocks = 0
                     else:
                         # Do nothing, keep gathering logs and decoding them
                         pass
                 else:
-                    tmpDF = pd.DataFrame(allLogs)
-                    tmpDF.to_parquet(os.path.join(saveLocation, f"trades_{parquetSaveBlockRange[0]}_{parquetSaveBlockRange[1]}.parquet"), index=False)
-                    parquetSaveBlockRange = [None, None]
+                    _saveDataToParquet(saveLocation, saveFileIDX, allLogs)
 
-                    # Clean memory
-                    del allLogs, tmpDF
+                    # Clean up
+                    del allLogs
                     gc.collect()
                     allLogs = []
-                    print("df size", tmpDF.memory_usage(deep=True).sum() / (1024**2), "MB")
+                    acquiredBlocks = 0
                 
-                batchEnd -= blockBatchSize * parallelRequests
+                batchStart += blockBatchSize * parallelRequests
                 
                 # Reset the retries after a successful fetch
-                _retries = 0 
+                retries = 0 
             except Exception as e:
                 print(f"Failed to fetch blocks from {batchStart} to {batchEnd}. Error: {e}")
                 
                 time.sleep(1)
-                _retries += 1
+                retries += 1
 

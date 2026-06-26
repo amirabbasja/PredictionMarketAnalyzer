@@ -1,8 +1,8 @@
 from src.handlers.polymarket import PolymarketHandler
-from src.utils.utils import readJSONL, humanReadableFileSize, Errors, readParquet
+from src.utils.utils import *
 from dotenv import load_dotenv
 from pathlib import Path
-import os, pprint, sys, json
+import os, pprint, sys, json, duckdb
 import pandas as pd
 from datetime import datetime
 import asyncio
@@ -11,11 +11,11 @@ load_dotenv()
 
 handler = PolymarketHandler(
     os.getenv("polymarket_api_key", None),
-    os.getenv("drpcAPI_key", None),
-    provider = "drpc"
+    os.getenv("alchemyAPI_key", None),
+    provider = "alchemy"
 )
 
-if sys.argv[1] == "--getAllEvents":
+if   sys.argv[1] == "--getAllEvents":
     result = handler.getAllEvents(
         saveFile = f"src/data/liveEvents_{int(datetime.now().timestamp())}.parquet", 
         getMarkets = False,
@@ -24,13 +24,13 @@ if sys.argv[1] == "--getAllEvents":
             # "liquidity_max": 100_000_000,
         },
     )
-elif sys.argv[1] == "--getAllMarkets":
+elif sys.argv[1] == "--getLiveMarkets":
     getPriceData = False
     if(len(sys.argv) > 2 and sys.argv[2] == "--price"):
         getPriceData = True
         
     result = handler.getAllMarkets(
-        saveFile = f"src/data/liveMarkets_{int(datetime.now().timestamp())}.parquet", 
+        saveFile = f"src/data/polymarket_liveMarkets_{int(datetime.now().timestamp())}.parquet", 
         getMarkets = True,
         getPriceData = getPriceData,
         reqOptions = {
@@ -75,7 +75,7 @@ elif sys.argv[1] == "--getHistoricalMarkets":
             exit()
     
     result = handler.getAllMarkets(
-        saveFile = f"src/data/historicalMarkets_{int(datetime.now().timestamp())}.jsonl.gz" if not "--continue" in sys.argv else filePath, 
+        saveFile = f"src/data/polymarket_HistoricalMarkets.parquet" if not "--continue" in sys.argv else filePath, 
         getMarkets = True,
         getPriceData = getPriceData,
         checkpoint = (lastCursor, lineCount),
@@ -107,44 +107,119 @@ elif sys.argv[1] == "--getPriceHistory":
     print(result)
 elif sys.argv[1] == "--toCsv":
     if len(sys.argv) < 3:
-        print("Please provide a file path to read.")
+        print("Please provide a file or folder path.")
         exit()
     
-    filePath = sys.argv[2].replace("\\", "/")  # Handle Windows-style paths
+    filePath = sys.argv[2].replace("\\", "/")
     _path = Path(filePath)
-    if not _path.is_file():
-        print(f"File not found: {filePath}")
+    
+    if not _path.exists():
+        print(f"Path not found: {filePath}")
         exit()
     
-    fileName = ""
-    if "jsonl.gz" in filePath:
-        fileName = Path(_path.stem).stem
+    # Determine output filename
+    if _path.is_file():
+        fileName = Path(_path.stem).stem if "jsonl.gz" in filePath else _path.stem
     else:
-        fileName = _path.stem
+        # For folders, use folder name
+        fileName = _path.name
     
-    print(f"File size: {humanReadableFileSize(filePath)}")
+    print(f"Processing: {filePath}")
     
-    if filePath.endswith(".jsonl.gz") or filePath.endswith(".jsonl"):
-        data = readJSONL(filePath)
-    elif filePath.endswith(".parquet"):
-        data = readParquet(filePath)
+    all_data = []
+    
+    if _path.is_file():
+        # === Single file ===
+        print(f"File size: {humanReadableFileSize(filePath)}")
+        
+        if filePath.endswith(".jsonl.gz") or filePath.endswith(".jsonl"):
+            data = readJSONL(filePath)
+        elif filePath.endswith(".parquet"):
+            data = readParquet(filePath)
+        else:
+            print("Unsupported file format.")
+            exit()
+        
+        all_data.extend(data)
+        print(f"Items read: {len(data)}")
+        
+    elif _path.is_dir():
+        # === Folder with multiple Parquet files ===
+        parquet_files = list(_path.rglob("*.parquet"))
+        
+        if not parquet_files:
+            print("No .parquet files found in the folder.")
+            exit()
+        
+        print(f"Found {len(parquet_files)} Parquet files.")
+        
+        for i, pfile in enumerate(parquet_files, 1):
+            print(f"[{i}/{len(parquet_files)}] Reading: {pfile.name}")
+            try:
+                data = readParquet(str(pfile))
+                all_data.extend(data)
+                print(f"   → {len(data)} items")
+            except Exception as e:
+                print(f"   → Error reading {pfile.name}: {e}")
+    
     else:
-        print("Unsupported file format.")
+        print("Path is neither a file nor a directory.")
         exit()
     
-    print(f"Total items read: {len(data)}")
+    if not all_data:
+        print("No data found.")
+        exit()
     
-    df = pd.DataFrame(data)
-    df.to_csv(f"src/data/{fileName}.csv", index=True)
+    print(f"\nTotal items collected: {len(all_data)}")
+    
+    # Convert to DataFrame and save as CSV
+    df = pd.DataFrame(all_data)
+    
+    output_path = f"src/data/{fileName}.csv"
+    df.to_csv(output_path, index=False)   # index=False is usually better for data exports
+    
+    print(f"Successfully saved to: {output_path}")
+    print(f"CSV shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
 elif sys.argv[1] == "--getAllTrades":
-    handler.getAllTrades(
-        saveLocation = f"src/data/polymarketTrades", 
-        toBlock = "latest",
-        fromBlock = 0,
-        blockBatchSize = 100,
-        parallelRequests = 20,
-        saveBlockRange = 100_000,
-        decodeLogs = False
-    )
-else:
+    _saveDirectory = "./src/data/polymarketData"
+    
+    if not os.getenv("graphQLAPI_key", None):
+        print("please provide a Graph QL api key")
+        exit()
+    
+    if not os.path.isdir(_saveDirectory):
+        print("No prior data were found for polymarket trades, starting from scratch...")
+        # TODO: Get polymarket v1 trades from hugging face
+        print("Not implemented yet")
+        exit()
+    else:
+        blockNumber = None
+        
+        # Get the checkpoint to start getting data from
+        maxBlockNumber = queryParquetFolder(_saveDirectory, "SELECT MAX(block_number) FROM data AS max_value")
+        if maxBlockNumber.iloc[0,0] == -1:
+            # No block_number avilable, get the latest block number from timestamp
+            maxTimestamp = queryParquetFolder(_saveDirectory, "SELECT MAX(block_timestamp) FROM data AS max_value").iloc[0,0]
+            
+            if maxTimestamp == -1:
+                raise ValueError("Cannot pinpoint where to start getting trades. No latest block number or timestamp avilable")
+            else: 
+                print("Getting the latest downloaded block number...")
+                blockNumber = getBlockNumberFromTS(handler.w3["polygon"], maxTimestamp)
+        else:
+            blockNumber = maxBlockNumber.iloc[0,0]
+        
+        print(f"Starting to fetch from block number {blockNumber} to the latest block")
+        if blockNumber is not None:
+            # # Start Fetching trades from this block until now
+            # handler.getAllTrades_Graph(_saveDirectory, os.getenv("graphQLAPI_key"), None, "latest")
+            handler.getAllTrades_RPC(
+                _saveDirectory,
+                fromBlock = blockNumber,
+                toBlock = "latest",
+                blockBatchSize = 400,
+                maxFileSize_GB = 0.1,
+                saveBlockRange = 6_000
+            )
+else: 
     print("Invalid command.")

@@ -1,12 +1,15 @@
 # Utility functions
 from pprint import pprint
 
-import requests, aiohttp, json, os, gzip, sys
+import requests, aiohttp, json, os, gzip, sys, duckdb, shutil, tempfile
 
 from typing import Dict, List, Optional, Any, Union
 from enum import Enum
 import pyarrow as pa
+from pathlib import Path
+import pandas as pd
 import pyarrow.parquet as pq
+from web3.middleware import ExtraDataToPOAMiddleware
 
 # Used for compatibility with python 3.11 and below, which don't have StrEnum
 try:
@@ -170,6 +173,42 @@ def makeEmptyParquetFile(filePath: str, schema: pa.Schema) -> None:
         print(e)
         return False
 
+def queryParquetFile(filePath: str, sql: str) -> pd.DataFrame:
+    """
+    Run a SQL query over a single parquet file. Refer to the table as "data"
+
+    The parquet file is exposed as a virtual table called `data`.
+    Use `data` in your SQL query to reference it.
+
+    Args:
+        filePath: Path to the .parquet file.
+        sql:       SQL query using `data` as the table name.
+
+    Returns:
+        A pandas dataframe
+    """
+    con = duckdb.connect()
+    con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{filePath}')")
+    return con.execute(sql).df()
+
+def queryParquetFolder(directory: str, sql: str) -> pd.DataFrame:
+    """
+    Run a SQL query over all parquet files in a directory.
+
+    The parquet files are exposed as a virtual table called `data`.
+    Use `data` in your SQL query to reference them.
+
+    Args:
+        directory: Path to the folder containing .parquet files.
+        sql:       SQL query using `data` as the table name.
+
+    Returns:
+        A pandas dataframe
+    """
+    parquet_glob = str(Path(directory) / "*.parquet")
+    con = duckdb.connect()
+    con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{parquet_glob}')")
+    return con.execute(sql).df()
 
 def readJSONL(filePath: str) -> List[Dict[str, Any]]:
     """
@@ -217,7 +256,7 @@ def appendToJSONL(filePath: str, data: Union[list, Dict[str, Any]]) -> None:
             for item in data:
                 f.write(json.dumps(item) + "\n")
 
-def appendToParquet(filePath: str, data: Union[List[Dict[str, Any]], Dict[str, Any]], schema: Optional[pa.schema]) -> None:
+def appendToParquet(filePath: str, data: Union[List[Dict[str, Any]], Dict[str, Any]], schema: Optional[pa.schema] = None, safe: bool = False) -> None:
     """
     Append data to a .parquet file.
     
@@ -225,19 +264,64 @@ def appendToParquet(filePath: str, data: Union[List[Dict[str, Any]], Dict[str, A
         filePath: Path to the file
         data: Dictionary or list of dictionaries to append
         schema: Parquet schema
+        safe: If True, writes to a temp file first, then replaces the original
     """
     if isinstance(data, dict):
         data = [data]
-    
-    newTable = pa.Table.from_pylist(data, schema = schema)
-    
-    if os.path.isfile(filePath):
-        existing = pq.read_table(filePath)
-        combined = pa.concat_tables([existing, newTable])
-        pq.write_table(combined, filePath)
-    else:
-        pq.write_table(newTable, filePath)
 
+    newTable = pa.Table.from_pylist(data, schema=schema)
+
+    if os.path.isfile(filePath):
+        combined = pa.concat_tables([pq.read_table(filePath), newTable])
+    else:
+        combined = newTable
+
+    if safe:
+        dirPath = os.path.dirname(os.path.abspath(filePath))
+        tmpFd, tmpPath = tempfile.mkstemp(dir=dirPath, suffix=".parquet.tmp")
+        try:
+            os.close(tmpFd)
+            pq.write_table(combined, tmpPath)
+            os.replace(tmpPath, filePath)
+        except Exception as e:
+            if os.path.exists(tmpPath):
+                os.remove(tmpPath)
+            raise f"Error safe writing into the parquet file: {e}"
+    else:
+        pq.write_table(combined, filePath)
+
+def changeParquetFileInplace(filePath: str, query: str) -> None:
+    """
+    Runs a DuckDB SQL query against a parquet file and replaces the
+    original file with the result.
+
+    Inside `query`, refer to the input data as the table `source`, e.g.:
+        "SELECT * FROM source WHERE amount > 100"
+
+    The result is written to a temp file first and only swapped in once
+    the write succeeds, so the original file is never left broken or
+    deleted prematurely if the query fails.
+    """
+    filePath = os.path.abspath(filePath)
+    dirName = os.path.dirname(filePath)
+
+    # temp file in the same directory -> os.replace() below is atomic
+    fd, tmpFile = tempfile.mkstemp(suffix=".parquet", dir=dirName)
+    os.close(fd)
+
+    con = duckdb.connect()
+    try:
+        con.execute(
+            f"CREATE VIEW data AS SELECT * FROM read_parquet('{filePath}')"
+        )
+        con.execute(f"COPY ({query}) TO '{tmpFile}' (FORMAT PARQUET)")
+    except Exception:
+        os.remove(tmpFile)
+        raise
+    finally:
+        con.close()
+
+    os.replace(tmpFile, filePath)  # atomically overwrites the old file
 
 def streamJsonlGz(filePath: str):
     """
@@ -395,6 +479,63 @@ def getObjectSize(obj):
         size /= 1024
     return f"{size:.2f} TB"
 
+def getFromSubgraph(apiKey: str, subgraphID: str, query: str) -> Dict[str, Any]:
+    """
+    Fetches data from a Subgraph using the provided API key, subgraph ID, and query.
+
+    Args:
+        apiKey (str): The API key for authentication
+        subgraphID (str): The ID of the subgraph to query
+        query (str): The GraphQL query string
+
+    Returns:
+        Dict[str, Any]: The JSON response from the subgraph
+    """
+    
+    APIGraph = apiKey
+    subgraphID = subgraphID
+    result = sendRequest_Sync(
+        f"https://gateway.thegraph.com/api/subgraphs/id/{subgraphID}",
+        "POST",
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization":  f"Bearer {APIGraph}"
+        },
+        payload = {"query": query}
+    )
+    return result.json()
+
+def getBlockNumberFromTS(web3Handler, timestamp):
+    """
+    Gets the respective block number for a block's timestamp.
+    Injects POA middleware if not already present (required for Polygon).
+    """
+    # Inject once — safe to call even if already injected
+    try:
+        web3Handler.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    except Exception:
+        pass  # Already injected
+
+    low, high = 0, web3Handler.eth.block_number
+
+    while low < high:
+        mid = (low + high) // 2
+        if web3Handler.eth.get_block(mid).timestamp < timestamp:
+            low = mid + 1
+        else:
+            high = mid
+
+    return low
+
+def getSizeInGB(fileLoc: str) -> float:
+    """
+    Gets a file's size in gigabytes
+    
+    Args:
+        fileLoc (str): The location for the file
+    """
+    return os.path.getsize(fileLoc) / (1024 * 1024 * 1024)
+        
 class Errors(StrEnum):
     MISSING_API_KEY = "UNACCEPTABLE_API_KEY"
     WRONG_ARGUMENTS = "WRONG_ARGUMENTS"
