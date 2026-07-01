@@ -190,16 +190,21 @@ class PolymarketHandler:
 
         # Derive tokenId and side from the asset pair.
         # Convention: assetId == 0 means USDC (the collateral leg).
+        makerSide = None
+        takerSide = None
         if result["makerAssetId"] == 0:
             token_id = str(result["takerAssetId"])
-            side = 0  # BUY  – maker pays USDC, receives outcome token
+            makerSide = 0  # BUY  – maker pays USDC, receives outcome token
+            takerSide = 1
         else:
             token_id = str(result["makerAssetId"])
-            side = 1  # SELL – maker pays outcome token, receives USDC
+            makerSide = 1  # SELL – maker pays outcome token, receives USDC
+            takerSide = 0
 
         return {
             "token_id":            token_id,
-            "taker_side":               side,
+            "maker_side":               makerSide,
+            "taker_side":               takerSide,
             "maker_amount_filled":  result["maker_amount_filled"],
             "taker_amount_filled":  result["taker_amount_filled"],
             "order_hash":          "0x"+str(result["orderHash"].hex()),
@@ -228,7 +233,8 @@ class PolymarketHandler:
         
         returnDict = {
             "token_id":            str(result["tokenId"]),
-            "taker_side":               result["side"],
+            "maker_side":               result["side"],
+            "taker_side":               1 if result["side"] == 0 else 1,
             "maker_amount_filled":  result["maker_amount_filled"],
             "taker_amount_filled":  result["taker_amount_filled"],
             "order_hash":          "0x"+str(result["orderHash"].hex()),
@@ -263,7 +269,8 @@ class PolymarketHandler:
 
         return {
             "token_id":            token_id,
-            "taker_side":               side,
+            "maker_side":               side,
+            "taker_side":               1 if side == 0 else 1,
             "maker_amount_filled":  result["maker_amount_filled"],
             "taker_amount_filled":  result["taker_amount_filled"],
             "order_hash":          "0x"+str(result["orderHash"].hex()),
@@ -289,7 +296,8 @@ class PolymarketHandler:
 
         return {
             "token_id":            str(result["tokenId"]),
-            "taker_side":               result["side"],
+            "maker_side":               result["side"],
+            "taker_side":               1 if result["side"] == 0 else 1,
             "maker_amount_filled":  result["maker_amount_filled"],
             "taker_amount_filled":  result["taker_amount_filled"],
             "order_hash":          "0x"+str(result["orderHash"].hex()),
@@ -1080,6 +1088,9 @@ class PolymarketHandler:
                     exchangeType (str): The market type (Acceptable values: ctf_v1, ctf_v2, negrisk_v1, negrisk_v2)
             """
             fromBlock, toBlock, exchangeType = args
+            fromBlock = int(fromBlock)
+            toBlock = int(toBlock)
+            
             if exchangeType not in ["ctf_v1", "ctf_v2", "negrisk_v1", "negrisk_v2"]:
                 raise ValueError(f"Invalid market type: {exchangeType}. Acceptable values are: ctf_v1, ctf_v2, negrisk_v1, negrisk_v2")
             
@@ -1144,7 +1155,6 @@ class PolymarketHandler:
                 
             appendToParquet(_fileName, data, self.tradesSchema, True)
                 
-            
         # Make the directory if not there
         if not os.path.exists(saveLocation):
             print("Making a new directory for saving the trade data since it does not exist.")
@@ -1238,15 +1248,32 @@ class PolymarketHandler:
                         decoded["block_number"] = int(log["blockNumber"])
                         
                         # Do the necessary calculations
-                        decoded["amount"] =  decoded["taker_amount_filled"] / 1e6
                         decoded["amount_asset"] = "USDC"
                         decoded["fee"] =  decoded["fee"] / 1e6
                         decoded["fee_asset"] = "USDC"
-                        if decoded["maker_amount_filled"] > 0:
-                            price = decoded["taker_amount_filled"] / decoded["maker_amount_filled"]
-                        else:
-                            price = 0
                         decoded["taker_side"] = "BUY" if decoded["taker_side"] == 0 else "SELL"
+                        decoded["maker_side"] = "SELL" if decoded["taker_side"] == 0 else "BUY"
+                        
+                        amount = None
+                        price = None
+                        if decoded["taker_side"] == "BUY":
+                            # Taker -> buy | Maker -> sell
+                            if decoded["maker_amount_filled"] > 0:
+                                price = decoded["taker_amount_filled"] / decoded["maker_amount_filled"]
+                            else:
+                                price = 0
+                            
+                            amount = decoded["taker_amount_filled"] / 1e6
+                        else:
+                            # Taker -> sell | Maker -> buy
+                            if decoded["taker_amount_filled"] > 0:
+                                price = decoded["maker_amount_filled"] / decoded["taker_amount_filled"]
+                            else:
+                                price = 0
+                                
+                            amount = decoded["maker_amount_filled"] / 1e6
+                            
+                        decoded["amount"] = amount
                         decoded["price"] = price
                         decoded["extra_data"] = json.dumps({
                             "negative_risk": True if version == "negrisk_v1" or version == "negrisk_v2" else False,

@@ -208,38 +208,51 @@ polymarketHandler = PolymarketHandler(
 #         df = changeParquetFileInplace(os.path.join("src/data/polymarketData", file), query)
 
 
+# Fix a mistake in downloaded files
+import numpy as np
+import json
+for file in os.listdir("./src/data/polymarketData"):
+    if "polymarket_trades" not in file:
+        continue
 
-result = getFromSubgraph(
-    "a03be5e9f766c0de3ca0441519f1d9ca",
-    "",
-    """
-    {
-        orderFilledEvents(first: 1000,block: {number: 84997444}) {
-            id
-            transactionHash
-            timestamp
-            orderHash
-            blockNumber
-            takerAssetId
-            makerAssetId
-        }
-    }
-    """
-)
-pprint.pprint(result["data"]["orderFilledEvents"][0])
-pprint.pprint(len(result["data"]["orderFilledEvents"]))
-txHashes_ql = [x.transactionHash for x in result["data"]["orderFilledEvents"]]
+    _idx = int(file.replace("polymarket_trades_pt_", "").replace(".parquet", ""))
+    if _idx <= 19:
+        continue
 
-with open("src/ABIs/polygon/polymarket_exchange_CTF_v1.abi", "r") as f:
-    abi = json.load(f)
-contract_v1_CTF = polymarketHandler.w3["polygon"].eth.contract(address="0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", abi=abi)
+    print("Reading file", _idx)
+    _df = pd.DataFrame(queryParquetFile(
+        f"./src/data/polymarketData/polymarket_trades_pt_{_idx:03d}.parquet",
+        "SELECT * FROM data"
+    ))
+    print("Fixing file", _idx)
 
-result_2 = polymarketHandler.w3["polygon"].eth.get_logs({
-    "address": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-    "fromBlock": 84997444,
-    "toBlock": 84997444,
-    "topics": ["0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"]
-})
-txHashes_rpc = [x.transactionHash for x in result_2]
-print(len(result_2))
-pprint.pprint(dict(contract_v1_CTF.events.OrderFilled().process_log(result_2[0])), indent = 4)
+    # Parse JSON column once, vectorized
+    extra = pd.json_normalize(_df["extra_data"].apply(json.loads))
+    maker_amt = extra["maker_amount_filled"].astype(float)
+    taker_amt = extra["taker_amount_filled"].astype(float)
+
+    is_buy = _df["taker_side"] == "BUY"
+
+    # New taker_side: flip BUY<->SELL
+    new_taker_side = np.where(is_buy, "SELL", "BUY")
+
+    # New price: maker/taker if was BUY, else taker/maker
+    new_price = np.where(is_buy, maker_amt / taker_amt, taker_amt / maker_amt)
+
+    # New amount: maker_amt/1e7 if was BUY, else taker_amt/1e7
+    # (note: 10e6 == 1e7, just being explicit about what your original code did)
+    new_amount = np.where(is_buy, maker_amt, taker_amt) / 1e6
+
+    # Also fix maker_side inside extra_data and write back as JSON
+    extra["maker_side"] = np.where(is_buy, "BUY", "SELL")
+    new_extra_data = extra.to_dict(orient="records")
+    new_extra_data = [json.dumps(d) for d in new_extra_data]
+
+    _df["taker_side"] = new_taker_side
+    _df["price"] = new_price
+    _df["amount"] = new_amount
+    _df["extra_data"] = new_extra_data
+
+    print("Saving file", _idx)
+    _df.to_parquet(f"./src/data/polymarketData/polymarket_trades_pt_{_idx:03d}.parquet")
+                
