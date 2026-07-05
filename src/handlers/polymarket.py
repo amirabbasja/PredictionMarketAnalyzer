@@ -145,6 +145,7 @@ class PolymarketHandler:
             ("hoursTillExpiry", pa.float64()),
             ("question", pa.string()),
             ("questionID", pa.string()),
+            ("conditionID", pa.string()),
             ("orderMinSize", pa.float64()),
         ])
         self.tradesSchema = pa.schema([
@@ -790,6 +791,7 @@ class PolymarketHandler:
             returnData["description"] = data.get("description", "NO_DESCRIPTION").replace('\n', ' ').replace('\r', ' ') if data.get("description", None) is not None else "NO_DESCRIPTION" # Deleted due to storage issues
             returnData["question"] = data.get("question", "NO_QUESTION")
             returnData["questionID"] = data.get("questionID", "NO_QUESTION_ID")
+            returnData["conditionID"] = data.get("conditionId", "NO_CONDITION_ID")
             returnData["slug"] = data.get("slug", "NO_SLUG")
             returnData["spread"] = float(data.get("spread", -1))
             returnData["takerBaseFee"] = float(data.get("takerBaseFee", -1))

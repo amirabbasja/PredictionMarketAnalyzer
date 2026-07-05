@@ -75,7 +75,7 @@ elif sys.argv[1] == "--getHistoricalMarkets":
             exit()
     
     result = handler.getAllMarkets(
-        saveFile = f"src/data/polymarket_HistoricalMarkets.parquet" if not "--continue" in sys.argv else filePath, 
+        saveFile = f"src/data/polymarket/historical_markets/polymarket_HistoricalMarkets.parquet" if not "--continue" in sys.argv else filePath, 
         getMarkets = True,
         getPriceData = getPriceData,
         checkpoint = (lastCursor, lineCount),
@@ -221,5 +221,37 @@ elif sys.argv[1] == "--getAllTrades":
                 maxFileSize_GB = 0.1,
                 saveBlockRange = 6_000
             )
+# elif sys.argv[1] == "--getMarketPrices":
+#     # Gets prices for markets and saves them
+#     # Saves the data to ./src/data/polymarket/markets_with_price
+#     _SaveDir = "./src/data/polymarket/markets_with_price"
+#     if len(sys.argv) < 3 or (("--tradesLocation" not in sys.argv) and ("--markets" not in sys.argv)):
+#         print("Please pass --tradesLocation and --markets flags, specifying")
+#         print("1) Directory containing all trades (Its files should have polymarket_trades_pt_xxx.parquet format)")
+#         print("2) The parquet files containing all markets that you want to get their utcomes' prices")
+#         exit()
+    
+#     tradesDir = sys.argv[sys.argv.index("--tradesLocation") + 1]
+#     marketsFileLoc = sys.argv[sys.argv.index("--markets") + 1]
+    
+#     if not os.path.exists(marketsFileLoc):
+#         print("Markets file not found:", marketsFileLoc)
+#         exit()
+  
+#     if not os.path.isdir(tradesDir):
+#         print("Trades directory found:", tradesDir)
+#         exit()
+        
+#     # Make the directory to save the data
+#     if not os.path.isdir(_SaveDir):
+#         os.makedirs(_SaveDir, exist_ok=True)
+    
+#     print("Loading all markets...")
+#     allMarkets = pd.DataFrame(queryParquetFile(marketsFileLoc, "SELECT * FROM data"))
+    
+#     # Get previously acquired market prices
+#     processedData = pd.DataFrame(queryParquetFile(marketsFileLoc, "SELECT marketID FROM data")).marketID.to_list()
+    
+    
 else: 
     print("Invalid command.")
