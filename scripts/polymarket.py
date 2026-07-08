@@ -181,7 +181,7 @@ elif sys.argv[1] == "--toCsv":
     print(f"Successfully saved to: {output_path}")
     print(f"CSV shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
 elif sys.argv[1] == "--getAllTrades":
-    _saveDirectory = "./src/data/polymarketData"
+    _saveDirectory = "./src/data/polymarket/trades"
     
     if not os.getenv("graphQLAPI_key", None):
         print("please provide a Graph QL api key")

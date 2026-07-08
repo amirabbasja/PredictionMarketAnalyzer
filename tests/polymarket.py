@@ -2,8 +2,6 @@
 from src.handlers.polymarket import PolymarketHandler
 from src.utils.utils import *
 from dotenv import load_dotenv
-import psycopg2
-from psycopg2 import OperationalError
 import copy
 import requests
 from datetime import datetime
@@ -170,8 +168,8 @@ polymarketHandler = PolymarketHandler(
 #     parser = argparse.ArgumentParser(description=__doc__)
  
 #     batch_parquet_files(
-#         input_dir="./src/data/polymarketData/daily_aligned",
-#         output_dir="./src/data/polymarketData",
+#         input_dir="./src/data/polymarket/trades/daily_aligned",
+#         output_dir="./src/data/polymarket/trades",
 #         target_gb=1,
 #         rows_per_chunk=100_000,
 #     )
@@ -211,48 +209,91 @@ polymarketHandler = PolymarketHandler(
 # Fix a mistake in downloaded files
 import numpy as np
 import json
-for file in os.listdir("./src/data/polymarketData"):
+files = sorted(os.listdir("./src/data/polymarket/trades"), key = lambda x: int(x.replace("polymarket_trades_pt_", "").replace(".parquet", "")))
+for file in files:
     if "polymarket_trades" not in file:
         continue
 
     _idx = int(file.replace("polymarket_trades_pt_", "").replace(".parquet", ""))
-    if _idx <= 19:
+    if _idx != 130:
         continue
 
     print("Reading file", _idx)
     _df = pd.DataFrame(queryParquetFile(
-        f"./src/data/polymarketData/polymarket_trades_pt_{_idx:03d}.parquet",
+        f"./src/data/polymarket/trades/polymarket_trades_pt_{_idx:03d}.parquet",
         "SELECT * FROM data"
     ))
     print("Fixing file", _idx)
+    
 
     # Parse JSON column once, vectorized
-    extra = pd.json_normalize(_df["extra_data"].apply(json.loads))
+    parsed = _df["extra_data"].apply(json.loads)
+    extra = pd.json_normalize(parsed)
+
+    # Only rows where extra_data does NOT already have a maker_side get fixed
+    needs_fix = ~parsed.apply(lambda d: "maker_side" in d)
+
+    u = _df[_df["tx_hash"] == "0x8020a592be86aa047f0dffcb01d8945ffea3cc376f883e06ae27cf8b41b8bf83"]
+    print(u.iloc[0])
+    print("______")
+    print(u.iloc[1])
+    
+    
+    
     maker_amt = extra["maker_amount_filled"].astype(float)
     taker_amt = extra["taker_amount_filled"].astype(float)
 
     is_buy = _df["taker_side"] == "BUY"
 
-    # New taker_side: flip BUY<->SELL
+    # New taker_side: flip BUY<->SELL (only where needs_fix)
     new_taker_side = np.where(is_buy, "SELL", "BUY")
 
     # New price: maker/taker if was BUY, else taker/maker
     new_price = np.where(is_buy, maker_amt / taker_amt, taker_amt / maker_amt)
 
-    # New amount: maker_amt/1e7 if was BUY, else taker_amt/1e7
-    # (note: 10e6 == 1e7, just being explicit about what your original code did)
+    # New amount: maker_amt/1e6 if was BUY, else taker_amt/1e6
     new_amount = np.where(is_buy, maker_amt, taker_amt) / 1e6
 
-    # Also fix maker_side inside extra_data and write back as JSON
-    extra["maker_side"] = np.where(is_buy, "BUY", "SELL")
+    # New maker_side for extra_data
+    new_maker_side = np.where(is_buy, "BUY", "SELL")
+
+    # Apply changes only where needs_fix is True; otherwise keep originals
+    _df["taker_side"] = np.where(needs_fix, new_taker_side, _df["taker_side"])
+    _df["price"] = np.where(needs_fix, new_price, _df["price"])
+    _df["amount"] = np.where(needs_fix, new_amount, _df["amount"])
+
+    extra["maker_side"] = np.where(needs_fix, new_maker_side, extra.get("maker_side", pd.Series([None] * len(extra))))
     new_extra_data = extra.to_dict(orient="records")
     new_extra_data = [json.dumps(d) for d in new_extra_data]
 
-    _df["taker_side"] = new_taker_side
-    _df["price"] = new_price
-    _df["amount"] = new_amount
-    _df["extra_data"] = new_extra_data
+    # Only overwrite extra_data for rows that needed fixing; keep original JSON otherwise
+    _df["extra_data"] = np.where(needs_fix, new_extra_data, _df["extra_data"])
+          
+         
 
-    print("Saving file", _idx)
-    _df.to_parquet(f"./src/data/polymarketData/polymarket_trades_pt_{_idx:03d}.parquet")
+    u = _df[_df["tx_hash"] == "0x8020a592be86aa047f0dffcb01d8945ffea3cc376f883e06ae27cf8b41b8bf83"]
+    print(u.iloc[0])
+    print("______")
+    print(u.iloc[1])
+    exit() 
+          
                 
+# # Test the integrity of data in the parquet files
+# directory = "./src/data/polymarket/trades"
+# files = sorted(
+#     os.listdir(directory),
+#     key = lambda x: int(x.replace("polymarket_trades_pt_", "").replace(".parquet", ""))
+# )
+# idx = 0
+# for file in files:
+#     idx = file.replace("polymarket_trades_pt_", "").replace(".parquet", "")
+#     startBlock = pd.DataFrame(queryParquetFile(f"src/data/polymarket/trades/polymarket_trades_pt_{idx}.parquet", "SELECT MIN(block_number) AS largest_value FROM data")).iloc[0,0]
+#     endBlock = pd.DataFrame(queryParquetFile(f"src/data/polymarket/trades/polymarket_trades_pt_{idx}.parquet", "SELECT MAX(block_number) AS largest_value FROM data")).iloc[0,0]
+    
+#     if startBlock == -1:
+#         startBlock = getBlockNumberFromTS(polymarketHandler.w3["polygon"], pd.DataFrame(queryParquetFile(f"src/data/polymarket/trades/polymarket_trades_pt_{idx}.parquet", "SELECT MIN(block_timestamp) AS largest_value FROM data")).iloc[0,0])
+    
+#     if endBlock == -1:
+#         endBlock = getBlockNumberFromTS(polymarketHandler.w3["polygon"], pd.DataFrame(queryParquetFile(f"src/data/polymarket/trades/polymarket_trades_pt_{idx}.parquet", "SELECT MAX(block_timestamp) AS largest_value FROM data")).iloc[0,0])
+    
+#     print(f"File: {file}, Start Block: {startBlock:,}, End Block: {endBlock:,}, Total Blocks: {endBlock - startBlock:,}")

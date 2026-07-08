@@ -31,12 +31,12 @@ class PolymarketHandler:
         # Get necessary parameters
         self.polymarketAPIkey = polymarketAPIkey
         self.web3APIkey = web3APIkey
-        self.w3 = None
         
         if not self.polymarketAPIkey:
             print("Warning: No Polymarket API key provided.")
         
         if not self.web3APIkey:
+            self.w3 = None
             print("Warning: No Web3 API key provided.")
         else:
             _endpoint = ""
