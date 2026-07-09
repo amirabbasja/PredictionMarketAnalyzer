@@ -213,7 +213,8 @@ class PolymarketHandler:
             "maker":              Web3.to_checksum_address(result["maker"]),
             "fee":                result["fee"],
             "platform_name":          "polymarket",
-            "platform_version":    "ctf_v1"
+            "platform_version":    "ctf_v1",
+            "_side":                result.get("side", "None")
         }
     
     def _CTF_V2_OrderFilled_fastDecode(self, log):
@@ -243,7 +244,8 @@ class PolymarketHandler:
             "maker":              Web3.to_checksum_address(result["maker"]),
             "fee":                result["fee"],
             "platform_name":          "polymarket",
-            "platform_version":    "ctf_v2"
+            "platform_version":    "ctf_v2",
+            "_side":                result.get("side", "None")
         }
 
         return returnDict
@@ -279,7 +281,8 @@ class PolymarketHandler:
             "maker":              Web3.to_checksum_address(result["maker"]),
             "fee":                result["fee"],
             "platform_name":          "polymarket",
-            "platform_version":    "negrisk_v1"
+            "platform_version":    "negrisk_v1",
+            "_side":                result.get("side", "None")
         }
 
     def _NEGRISK_V2_OrderFilled_fastDecode(self, log):
@@ -306,7 +309,8 @@ class PolymarketHandler:
             "maker":              Web3.to_checksum_address(result["maker"]),
             "fee":                result["fee"],
             "platform_name":          "polymarket",
-            "platform_version":    "negrisk_v2"
+            "platform_version":    "negrisk_v2",
+            "_side":                result.get("side", "None")
         }
 
     async def getPriceHistory_async(self, marketID: str, outcomeIDs: tuple[str, str], **kwargs):
@@ -1182,7 +1186,7 @@ class PolymarketHandler:
         startTime = time.time()
         acquiredBlocks = 0
         while batchStart <= toBlock:
-            # Check the save file size - If the file size is higehr than maxFileSize_GB, aim to save in a new file
+            # Check the save file size - If the file size is higher than maxFileSize_GB, aim to save in a new file
             if os.path.exists(os.path.join(saveLocation, f"polymarket_trades_pt_{saveFileIDX:03d}.parquet")):
                 if maxFileSize_GB < getSizeInGB(os.path.join(saveLocation, f"polymarket_trades_pt_{saveFileIDX:03d}.parquet")):
                     saveFileIDX += 1
@@ -1226,7 +1230,7 @@ class PolymarketHandler:
                             elif version == "negrisk_v1":
                                 decoded = self._NEGRISK_V1_OrderFilled_fastDecode(log)
                             elif version == "negrisk_v2":
-                                decoded = self._NEGRISK_V1_OrderFilled_fastDecode(log)
+                                decoded = self._NEGRISK_V2_OrderFilled_fastDecode(log)
                         else:
                             if   version == "ctf_v1":
                                 topic0 = self.exchange_CFT_v1_OrderFilled_topic0
@@ -1281,7 +1285,8 @@ class PolymarketHandler:
                             "negative_risk": True if version == "negrisk_v1" or version == "negrisk_v2" else False,
                             "order_hash": decoded["order_hash"],
                             "maker_amount_filled": decoded["maker_amount_filled"],
-                            "taker_amount_filled": decoded["taker_amount_filled"]
+                            "taker_amount_filled": decoded["taker_amount_filled"],
+                            "side": decoded["_side"]
                         })
                         
                         allLogs.append(decoded)
