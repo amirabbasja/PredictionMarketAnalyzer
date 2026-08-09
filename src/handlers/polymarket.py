@@ -11,6 +11,7 @@ from web3 import Web3
 from eth_abi import decode
 import concurrent.futures
 import gc
+from collections import defaultdict
 from functools import wraps
 import time
 import pyarrow as pa
@@ -148,6 +149,47 @@ class PolymarketHandler:
             ("conditionID", pa.string()),
             ("orderMinSize", pa.float64()),
         ])
+        self.marketsSchemaWithPrice = pa.schema([
+            ("slug", pa.string()),
+            ("marketID", pa.string()),
+            ("bestAsk", pa.float64()),
+            ("bestBid", pa.float64()),
+            ("outcome_0", pa.string()),
+            ("outcome_0_ID", pa.string()),
+            ("outcome_0_price", pa.float64()),
+            ("outcome_0_return", pa.float64()),
+            ("outcome_1", pa.string()),
+            ("outcome_1_ID", pa.string()),
+            ("outcome_1_price", pa.float64()),
+            ("outcome_1_return", pa.float64()),
+            ("spread", pa.float64()),
+            ("volumeNum", pa.float64()),
+            ("volume1yr", pa.float64()),
+            ("volumeAmm", pa.float64()),
+            ("volumeClob", pa.float64()),
+            ("takerBaseFee", pa.float64()),
+            ("makerBaseFee", pa.float64()),
+            ("active", pa.bool_()),
+            ("archived", pa.bool_()),
+            ("closed", pa.bool_()),
+            ("liquidity", pa.float64()),
+            ("liquidityNum", pa.float64()),
+            ("description", pa.string()),
+            ("createdAt", pa.string()),
+            ("startDate", pa.string()),
+            ("endDate", pa.string()),
+            ("daysTillExpiry", pa.float64()),
+            ("hoursTillExpiry", pa.float64()),
+            ("question", pa.string()),
+            ("questionID", pa.string()),
+            ("conditionID", pa.string()),
+            ("orderMinSize", pa.float64()),
+            ("outcome_0_history_price", pa.list_(pa.float64())),
+            ("outcome_0_history_price_ts", pa.list_(pa.int64())),
+            ("outcome_1_history_price", pa.list_(pa.float64())),
+            ("outcome_1_history_price_ts", pa.list_(pa.int64())),
+            ("has_price_history", pa.bool_()),
+        ])
         self.tradesSchema = pa.schema([
             ("block_number", pa.int64()),
             ("block_timestamp", pa.int64()),
@@ -204,17 +246,16 @@ class PolymarketHandler:
 
         return {
             "token_id":            token_id,
-            "maker_side":               makerSide,
-            "taker_side":               takerSide,
-            "maker_amount_filled":  result["maker_amount_filled"],
-            "taker_amount_filled":  result["taker_amount_filled"],
-            "order_hash":          "0x"+str(result["orderHash"].hex()),
-            "taker":              Web3.to_checksum_address(result["taker"]),
-            "maker":              Web3.to_checksum_address(result["maker"]),
-            "fee":                result["fee"],
-            "platform_name":          "polymarket",
-            "platform_version":    "ctf_v1",
-            "_side":                result.get("side", "None")
+            "maker_side":          makerSide,
+            "taker_side":          takerSide,
+            "maker_amount_filled": result["maker_amount_filled"],
+            "taker_amount_filled": result["taker_amount_filled"],
+            "order_hash":          str(result["orderHash"].hex()).upper(),
+            "taker":               Web3.to_checksum_address(result["taker"]),
+            "maker":               Web3.to_checksum_address(result["maker"]),
+            "fee":                 result["fee"],
+            "platform_name":       "polymarket",
+            "platform_version":    "ctf_v1"
         }
     
     def _CTF_V2_OrderFilled_fastDecode(self, log):
@@ -235,17 +276,16 @@ class PolymarketHandler:
         
         returnDict = {
             "token_id":            str(result["tokenId"]),
-            "maker_side":               result["side"],
-            "taker_side":               1 if result["side"] == 0 else 1,
-            "maker_amount_filled":  result["maker_amount_filled"],
-            "taker_amount_filled":  result["taker_amount_filled"],
-            "order_hash":          "0x"+str(result["orderHash"].hex()),
-            "taker":              Web3.to_checksum_address(result["taker"]),
-            "maker":              Web3.to_checksum_address(result["maker"]),
-            "fee":                result["fee"],
-            "platform_name":          "polymarket",
-            "platform_version":    "ctf_v2",
-            "_side":                result.get("side", "None")
+            "maker_side":          result["side"],
+            "taker_side":          1 if result["side"] == 0 else 0,
+            "maker_amount_filled": result["maker_amount_filled"],
+            "taker_amount_filled": result["taker_amount_filled"],
+            "order_hash":          str(result["orderHash"].hex()).upper(),
+            "taker":               Web3.to_checksum_address(result["taker"]),
+            "maker":               Web3.to_checksum_address(result["maker"]),
+            "fee":                 result["fee"],
+            "platform_name":       "polymarket",
+            "platform_version":    "ctf_v2"
         }
 
         return returnDict
@@ -272,17 +312,16 @@ class PolymarketHandler:
 
         return {
             "token_id":            token_id,
-            "maker_side":               side,
-            "taker_side":               1 if side == 0 else 1,
-            "maker_amount_filled":  result["maker_amount_filled"],
-            "taker_amount_filled":  result["taker_amount_filled"],
-            "order_hash":          "0x"+str(result["orderHash"].hex()),
-            "taker":              Web3.to_checksum_address(result["taker"]),
-            "maker":              Web3.to_checksum_address(result["maker"]),
-            "fee":                result["fee"],
-            "platform_name":          "polymarket",
-            "platform_version":    "negrisk_v1",
-            "_side":                result.get("side", "None")
+            "maker_side":          side,
+            "taker_side":          1 if side == 0 else 0,
+            "maker_amount_filled": result["maker_amount_filled"],
+            "taker_amount_filled": result["taker_amount_filled"],
+            "order_hash":          str(result["orderHash"].hex()).upper(),
+            "taker":               Web3.to_checksum_address(result["taker"]),
+            "maker":               Web3.to_checksum_address(result["maker"]),
+            "fee":                 result["fee"],
+            "platform_name":       "polymarket",
+            "platform_version":    "negrisk_v1"
         }
 
     def _NEGRISK_V2_OrderFilled_fastDecode(self, log):
@@ -300,17 +339,16 @@ class PolymarketHandler:
 
         return {
             "token_id":            str(result["tokenId"]),
-            "maker_side":               result["side"],
-            "taker_side":               1 if result["side"] == 0 else 1,
-            "maker_amount_filled":  result["maker_amount_filled"],
-            "taker_amount_filled":  result["taker_amount_filled"],
-            "order_hash":          "0x"+str(result["orderHash"].hex()),
-            "taker":              Web3.to_checksum_address(result["taker"]),
-            "maker":              Web3.to_checksum_address(result["maker"]),
-            "fee":                result["fee"],
-            "platform_name":          "polymarket",
-            "platform_version":    "negrisk_v2",
-            "_side":                result.get("side", "None")
+            "maker_side":          result["side"],
+            "taker_side":          1 if result["side"] == 0 else 0,
+            "maker_amount_filled": result["maker_amount_filled"],
+            "taker_amount_filled": result["taker_amount_filled"],
+            "order_hash":          str(result["orderHash"].hex()).upper(),
+            "taker":               Web3.to_checksum_address(result["taker"]),
+            "maker":               Web3.to_checksum_address(result["maker"]),
+            "fee":                 result["fee"],
+            "platform_name":       "polymarket",
+            "platform_version":    "negrisk_v2"
         }
 
     async def getPriceHistory_async(self, marketID: str, outcomeIDs: tuple[str, str], **kwargs):
@@ -820,7 +858,7 @@ class PolymarketHandler:
             outcomes = json.loads(data.get("outcomes")) if data.get("outcomes", None) is not None else None
             outcomePrices = json.loads(data.get("outcomePrices")) if data.get("outcomePrices", None) is not None else ""
             tokenIDs = json.loads(data.get("clobTokenIds", ["",""])) if data.get("clobTokenIds", None) is not None else ["",""]
-
+            
             if isinstance(outcomes, list) and len(outcomes) == 2 and outcomePrices != "" and outcomePrices is not None:
                 # Outcome 0 - first outcome
                 returnData["outcome_0_price"] = float(outcomePrices[0])
@@ -1066,9 +1104,10 @@ class PolymarketHandler:
             toBlock: Union[int, None, str],
             blockBatchSize: int = 1000,
             parallelRequests: int = 1,
-            saveBlockRange: int = None, 
+            saveBlockRange: Union[int, None, str] = None, 
             decodeLogs: bool = True,
             maxFileSize_GB: float = 0.8,
+            stopAfter: Union[int, None] = None
         ):
         """
         Using a web3 RPC, gets all trades for polymarket v1 and v2 and saves them into a parquet database.
@@ -1082,6 +1121,8 @@ class PolymarketHandler:
         
         Args:
             saveLocation (str): The directory to save the parquet databases
+
+            stopAfter (int): Stop getting trades after some time (in seconds) 
         """
         
         def _fetchLogs(args: tuple):
@@ -1093,6 +1134,7 @@ class PolymarketHandler:
                     blockRange (int, int): The block range to get the data from    
                     exchangeType (str): The market type (Acceptable values: ctf_v1, ctf_v2, negrisk_v1, negrisk_v2)
             """
+            startTime = time.time()
             fromBlock, toBlock, exchangeType = args
             fromBlock = int(fromBlock)
             toBlock = int(toBlock)
@@ -1186,7 +1228,7 @@ class PolymarketHandler:
         startTime = time.time()
         acquiredBlocks = 0
         while batchStart <= toBlock:
-            # Check the save file size - If the file size is higher than maxFileSize_GB, aim to save in a new file
+            # Check the save file size - If the file size is higehr than maxFileSize_GB, aim to save in a new file
             if os.path.exists(os.path.join(saveLocation, f"polymarket_trades_pt_{saveFileIDX:03d}.parquet")):
                 if maxFileSize_GB < getSizeInGB(os.path.join(saveLocation, f"polymarket_trades_pt_{saveFileIDX:03d}.parquet")):
                     saveFileIDX += 1
@@ -1198,6 +1240,13 @@ class PolymarketHandler:
             try:
                 print(f"Fetching logs from block {batchStart:,} to {batchEnd:,}. Remaining blocks: {toBlock - batchEnd:,} (Fetched {(batchEnd - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)")
                 
+                if os.getenv("telegramBotToken", None) and os.getenv("chatID"):
+                    sendTelegramMessage(
+                        os.getenv("telegramBotToken"),
+                        os.getenv("chatID"),
+                        f"Fetching logs from block {batchStart:,} to {batchEnd:,}. Remaining blocks: {toBlock - batchEnd:,} (Fetched {(batchEnd - fromBlock)/(toBlock - fromBlock) * 100:.2f}%)"
+                    )   
+
                 # Make parallel requests for 4 types of polymarket contracts and get their "OrderFilled" events
                 logs = {"ctf_v1": [], "ctf_v2": [], "negrisk_v1": [], "negrisk_v2": []}
                 _batchStartTime = time.time()
@@ -1230,7 +1279,7 @@ class PolymarketHandler:
                             elif version == "negrisk_v1":
                                 decoded = self._NEGRISK_V1_OrderFilled_fastDecode(log)
                             elif version == "negrisk_v2":
-                                decoded = self._NEGRISK_V2_OrderFilled_fastDecode(log)
+                                decoded = self._NEGRISK_V1_OrderFilled_fastDecode(log)
                         else:
                             if   version == "ctf_v1":
                                 topic0 = self.exchange_CFT_v1_OrderFilled_topic0
@@ -1285,10 +1334,14 @@ class PolymarketHandler:
                             "negative_risk": True if version == "negrisk_v1" or version == "negrisk_v2" else False,
                             "order_hash": decoded["order_hash"],
                             "maker_amount_filled": decoded["maker_amount_filled"],
-                            "taker_amount_filled": decoded["taker_amount_filled"],
-                            "side": decoded["_side"]
+                            "taker_amount_filled": decoded["taker_amount_filled"]
                         })
                         
+                        if 1 < decoded["price"]:
+                            print("unacceptable price value. Price should be between 0 and 1. Check the decoding function for errors.") # DEBUG: DELETE
+                            pprint.pprint(decoded)                                                                                      # DEBUG: DELETE
+                            exit()                                                                                                      # DEBUG: DELETE
+                            raise ValueError("unacceptable price value. Price should be between 0 and 1. Check the decoding function for errors.")
                         allLogs.append(decoded)
                 print(f"Gathered {len(allLogs):,} logs so far | size: {getObjectSize(allLogs)} | Cumulative time: {time.time() - startTime:.2f}s | Batch time: {time.time() - _batchStartTime:.2f}s")
 
@@ -1318,9 +1371,259 @@ class PolymarketHandler:
                 
                 # Reset the retries after a successful fetch
                 retries = 0 
+
+                # Stop after required timespan
+                if stopAfter and stopAfter < time.time() - startTime:
+                    return
             except Exception as e:
                 print(f"Failed to fetch blocks from {batchStart} to {batchEnd}. Error: {e}")
                 
                 time.sleep(1)
                 retries += 1
 
+
+    def addPricesToMarketData(self, marketDataPath: str, tradesDataPath: str, saveLocation: str, stopAfter: int = None, marketBatchSize: int = 200) -> None:
+        """
+        Adds the price data to the market data. Adds two columns to the market,
+        outcome_0_history_price and outcome_1_history_price. The price data is fetched from
+        the trades data. The trades data is expected to be a parquet file containing
+        the following columns: marketID, price, outcome, timestamp. The market
+        data is expected to be a parquet file with the following columns: marketID,
+        outcome_0_ID, outcome_1_ID. The function will match the marketID and
+        outcome_IDs to get the latest price for each outcome and add them to
+        the market data.
+    
+        Args:
+            marketDataPath (str): The path to the market data parquet file.
+            tradesDataPath (str): The path to the trades data parquet file.
+            saveLocation (str): The path to save the new market data parquet file with prices added
+            stopAfter (int, optional): The number of seconds after which to stop processing. Defaults to None.
+            marketBatchSize (int, optional): The number of markets to process at a time within
+                a single file-group. Keeps memory usage bounded by only loading trades for a
+                small batch of markets' token_ids at once, rather than the whole group. Defaults to 200.
+        """
+        MAX_FILE_SIZE_MB = 2000  # In MB
+        _toMB = lambda x: x / 1024 / 1024
+    
+        # First, get the min/max timestamp of each parquet file so we could avoid searching the entire directory (Its faster)
+        print("Mapping the timestamps to files")
+        files = sorted(
+            os.listdir(tradesDataPath),
+            key=lambda x: int(x.replace("polymarket_trades_pt_", "").replace(".parquet", ""))
+        )
+        filesDateRange = {}
+        for file in tqdm(files, total=len(files)):
+            minTS = queryParquetFile(os.path.join(tradesDataPath, file), "SELECT MIN(block_timestamp) FROM data").iloc[0, 0]
+            maxTS = queryParquetFile(os.path.join(tradesDataPath, file), "SELECT MAX(block_timestamp) FROM data").iloc[0, 0]
+            filesDateRange[file] = [minTS, maxTS]
+    
+        # Get a set of all markets
+        allMarkets = pd.DataFrame(queryParquetFile(marketDataPath, "SELECT * FROM data"))
+        allMarketIDs = set(allMarkets["marketID"].tolist())
+    
+        # Get a record of all previously processed markets
+        acquiredMarketIDs = pd.DataFrame(queryParquetFolder(saveLocation, "SELECT marketID FROM data"))
+        dfToSave, processedMarkets, saveFileIdx = None, None, None
+        if acquiredMarketIDs is None or acquiredMarketIDs.empty:
+            processedMarkets = set()
+            dfToSave = pd.DataFrame(columns=allMarkets.columns.tolist() + ["outcome_0_history_price", "outcome_0_history_price_ts", "outcome_1_history_price", "outcome_1_history_price_ts", "has_price_history"])
+            saveFileIdx = 1
+        else:
+            processedMarkets = set(acquiredMarketIDs["marketID"].tolist())
+    
+            latestPart = sorted(
+                [f for f in os.listdir(saveLocation) if f.startswith("polymarket_markets_with_prices_pt_") and f.endswith(".parquet")],
+                key=lambda x: int(x.replace("polymarket_markets_with_prices_pt_", "").replace(".parquet", ""))
+            )[-1]
+    
+            dfToSave = pd.DataFrame(queryParquetFile(os.path.join(saveLocation, latestPart), "SELECT * FROM data"))
+            if dfToSave is not None:
+                if MAX_FILE_SIZE_MB < _toMB(dfToSave.memory_usage(deep=True).sum()):
+                    dfToSave = pd.DataFrame(columns=allMarkets.columns.tolist() + ["outcome_0_history_price", "outcome_0_history_price_ts", "outcome_1_history_price", "outcome_1_history_price_ts", "has_price_history"])
+                    saveFileIdx = int(latestPart.replace("polymarket_markets_with_prices_pt_", "").replace(".parquet", "")) + 1
+                else:
+                    saveFileIdx = int(latestPart.replace("polymarket_markets_with_prices_pt_", "").replace(".parquet", ""))
+            else:
+                dfToSave = pd.DataFrame(columns=allMarkets.columns.tolist() + ["outcome_0_history_price", "outcome_0_history_price_ts", "outcome_1_history_price", "outcome_1_history_price_ts", "has_price_history"])
+    
+        remainingMarkets = allMarketIDs - processedMarkets
+        RemainingMarketsDF = allMarkets[allMarkets["marketID"].isin(remainingMarkets)]
+        print("Processed markets count:", len(processedMarkets))
+        print("Remaining markets count:", len(remainingMarkets))
+    
+        startTime = time.time()
+        rows = dfToSave.to_dict("records")
+    
+        runningSize = getObjectSizeInBytes(rows) if rows else 0
+    
+    
+        # Precompute market start/end timestamps and file groups without hitting disk.
+        # This grouping is cached to disk since it's a pure function of allMarkets +
+        # filesDateRange and can be expensive to recompute for large market sets.
+        groupsCacheFile = os.path.join(saveLocation, "_market_groups_cache.pkl")
+    
+        if os.path.exists(groupsCacheFile):
+            print(f"Found cached market groups at {groupsCacheFile}, loading instead of recomputing")
+            with open(groupsCacheFile, "rb") as f:
+                cache = pickle.load(f)
+            marketMeta = cache["marketMeta"]
+            groups = cache["groups"]
+        else:
+            marketMeta = {}  # marketID -> dict of market row fields
+            groups = defaultdict(list)  # frozenset(filesToSearch) -> list of marketIDs
+    
+            for market in tqdm(RemainingMarketsDF.itertuples(index=False), total=len(RemainingMarketsDF), desc="Grouping markets"):
+                marketID = market.marketID
+                if marketID in processedMarkets:
+                    continue
+    
+                marketStartTS = datetime.datetime.fromisoformat(market.startDate).timestamp() if market.startDate is not None else 0
+                marketEndTS = datetime.datetime.fromisoformat(market.endDate).timestamp() if market.endDate is not None else 9999999999
+    
+                filesToSearch = set()
+                for file, (beginTS, endTS) in filesDateRange.items():
+                    if beginTS <= marketStartTS <= endTS or beginTS <= marketEndTS <= endTS:
+                        filesToSearch.add(file)
+    
+                marketMeta[marketID] = market._asdict()
+                groups[frozenset(filesToSearch)].append(marketID)
+    
+            groups = dict(groups)
+            os.makedirs(saveLocation, exist_ok=True)
+            with open(groupsCacheFile, "wb") as f:
+                pickle.dump({"marketMeta": marketMeta, "groups": groups}, f)
+            print(f"Cached market groups to {groupsCacheFile}")
+    
+        filteredGroups = {}
+        skippedAlreadyProcessed = 0
+        for fileset, marketIDs in groups.items():
+            remainingIDs = [m for m in marketIDs if m not in processedMarkets]
+            skippedAlreadyProcessed += len(marketIDs) - len(remainingIDs)
+            if remainingIDs:
+                filteredGroups[fileset] = remainingIDs
+        groups = filteredGroups
+    
+        if skippedAlreadyProcessed:
+            print(f"Skipping {skippedAlreadyProcessed} markets already processed in a previous run")
+    
+        totalRemainingInGroups = sum(len(v) for v in groups.values())
+    
+        pBar = tqdm(total=totalRemainingInGroups, desc="Processing markets")
+        stopped = False
+        
+        n = len(groups)
+        for i, (filesToSearch, marketIDs) in enumerate(groups.items()):
+            isLast = (i == n - 1)
+
+            # No trades files match this group at all -> every market here has no price history
+            if len(filesToSearch) == 0:
+                for marketID in marketIDs:
+                    newRow = dict(marketMeta[marketID])
+                    newRow["outcome_0_history_price"] = []
+                    newRow["outcome_0_history_price_ts"] = []
+                    newRow["outcome_1_history_price"] = []
+                    newRow["outcome_1_history_price_ts"] = []
+                    newRow["has_price_history"] = False
+    
+                    rows.append(newRow)
+                    runningSize += getObjectSizeInBytes(newRow)
+                    pBar.update(1)
+                continue
+    
+            for batchStart in range(0, len(marketIDs), marketBatchSize):
+                batchMarketIDs = marketIDs[batchStart: batchStart + marketBatchSize]
+    
+                # Collect every outcome token_id needed by markets in this batch
+                neededTokenIDs = set()
+                for marketID in batchMarketIDs:
+                    m = marketMeta[marketID]
+                    neededTokenIDs.add(m["outcome_0_ID"])
+                    neededTokenIDs.add(m["outcome_1_ID"])
+    
+                # Single query per batch, for all token_ids in the batch, across the group's files
+                tokenIDList = "', '".join(str(t) for t in neededTokenIDs)
+                groupTrades = pd.DataFrame(queryParquetFile(
+                    [os.path.join(tradesDataPath, f) for f in filesToSearch],
+                    f"SELECT * FROM data WHERE token_id IN ('{tokenIDList}')"
+                ))
+    
+                # Build an O(1) lookup: token_id -> DataFrame of its trades
+                if groupTrades.shape[0] == 0:
+                    tradesByToken = {}
+                else:
+                    tradesByToken = {tok: df for tok, df in groupTrades.groupby("token_id")}
+    
+                # Free the raw trades DataFrame as soon as we've split it up
+                del groupTrades
+    
+                for marketID in batchMarketIDs:
+                    market = marketMeta[marketID]
+                    newRow = dict(market)
+    
+                    outcome_0_trades = tradesByToken.get(market["outcome_0_ID"])
+                    outcome_1_trades = tradesByToken.get(market["outcome_1_ID"])
+    
+                    if outcome_0_trades is None or outcome_0_trades.shape[0] == 0:
+                        newRow["outcome_0_history_price"] = []
+                        newRow["outcome_0_history_price_ts"] = []
+                        newRow["has_price_history"] = False
+                    else:
+                        newRow["outcome_0_history_price"] = outcome_0_trades["price"].tolist()
+                        newRow["outcome_0_history_price_ts"] = outcome_0_trades["block_timestamp"].tolist()
+                        newRow["has_price_history"] = True
+    
+                    if outcome_1_trades is None or outcome_1_trades.shape[0] == 0:
+                        newRow["outcome_1_history_price"] = []
+                        newRow["outcome_1_history_price_ts"] = []
+                        newRow["has_price_history"] = newRow.get("has_price_history", False)
+                    else:
+                        newRow["outcome_1_history_price"] = outcome_1_trades["price"].tolist()
+                        newRow["outcome_1_history_price_ts"] = outcome_1_trades["block_timestamp"].tolist()
+                        newRow["has_price_history"] = True
+    
+                    rows.append(newRow)
+                    runningSize += getObjectSizeInBytes(newRow)
+    
+                    # Flush to disk once the accumulated size crosses the threshold
+                    if MAX_FILE_SIZE_MB < _toMB(runningSize) or isLast:
+                        dfToSave = pd.DataFrame(rows)
+    
+                        outFile = os.path.join(saveLocation, f"polymarket_markets_with_prices_pt_{saveFileIdx:03d}.parquet")
+                        if os.path.exists(outFile):
+                            appendToParquet(outFile, dfToSave.to_dict("records"), self.marketsSchemaWithPrice, True)
+                        else:
+                            makeEmptyParquetFile(outFile, self.marketsSchemaWithPrice)
+                            appendToParquet(outFile, dfToSave.to_dict("records"), self.marketsSchemaWithPrice, True)
+    
+                        saveFileIdx += 1
+                        rows = []
+                        runningSize = 0
+                        del dfToSave
+    
+                    pBar.set_postfix(mem=f"{_toMB(runningSize):.4f} MB")
+                    pBar.update(1)
+    
+                    if len(rows) % 100 == 0:
+                        if os.getenv("telegramBotToken", None) and os.getenv("chatID"):
+                            sendTelegramMessage(
+                                os.getenv("telegramBotToken"),
+                                os.getenv("chatID"),
+                                f"Rows acquired: {len(rows)} | Dataframe size: {_toMB(runningSize)}"
+                            )
+    
+                    if stopAfter and stopAfter < time.time() - startTime:
+                        print(f"Stopping after {stopAfter} seconds as requested.")
+                        stopped = True
+                        break
+    
+                # Free per-batch lookup dict before moving to the next batch
+                del tradesByToken
+    
+                if stopped:
+                    break
+    
+            if stopped:
+                break
+    
+        pBar.close()
+        exit()

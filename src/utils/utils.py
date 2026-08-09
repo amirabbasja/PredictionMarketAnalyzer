@@ -173,22 +173,32 @@ def makeEmptyParquetFile(filePath: str, schema: pa.Schema) -> None:
         print(e)
         return False
 
-def queryParquetFile(filePath: str, sql: str) -> pd.DataFrame:
+def queryParquetFile(filePath: str | list[str], sql: str) -> pd.DataFrame:
     """
-    Run a SQL query over a single parquet file. Refer to the table as "data"
+    Run a SQL query over one or more parquet files. Refer to the table as "data".
 
-    The parquet file is exposed as a virtual table called `data`.
+    The parquet file(s) are exposed as a virtual table called `data`.
     Use `data` in your SQL query to reference it.
 
     Args:
-        filePath: Path to the .parquet file.
-        sql:       SQL query using `data` as the table name.
+        filePath: Path to a single .parquet file, or a list of paths to
+            multiple .parquet files. All files must share the same schema.
+        sql: SQL query using `data` as the table name.
 
     Returns:
-        A pandas dataframe
+        A pandas DataFrame.
     """
     con = duckdb.connect()
-    con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{filePath}')")
+
+    if isinstance(filePath, str):
+        paths = [filePath]
+    else:
+        paths = list(filePath)
+
+    # DuckDB's read_parquet accepts a list literal for multiple files
+    paths_literal = "[" + ", ".join(f"'{p}'" for p in paths) + "]"
+    con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet({paths_literal})")
+
     return con.execute(sql).df()
 
 def queryParquetFolder(directory: str, sql: str) -> pd.DataFrame:
@@ -200,15 +210,23 @@ def queryParquetFolder(directory: str, sql: str) -> pd.DataFrame:
 
     Args:
         directory: Path to the folder containing .parquet files.
-        sql:       SQL query using `data` as the table name.
+        sql: SQL query using `data` as the table name.
 
     Returns:
-        A pandas dataframe
+        A pandas dataframe if parquet files are found, otherwise None
     """
     parquet_glob = str(Path(directory) / "*.parquet")
-    con = duckdb.connect()
-    con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{parquet_glob}')")
-    return con.execute(sql).df()
+    try:
+        con = duckdb.connect()
+        con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{parquet_glob}')")
+        return con.execute(sql).df()
+    except Exception as e:
+        # Return None if no parquet files are found, instead of raising an error
+        if "No files found that match the pattern" in str(e):
+            print(f"No parquet files found in directory: {parquet_glob}")
+            return None
+        
+        raise ValueError(f"Error querying parquet folder: {e}")
 
 def readJSONL(filePath: str) -> List[Dict[str, Any]]:
     """
@@ -478,6 +496,18 @@ def getObjectSize(obj):
             return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} TB"
+    
+def getObjectSizeInBytes(obj):
+    """
+    Gets approximate size of an object in memory (bytes).
+    Recursively handles nested lists / containers.
+    """
+    size = sys.getsizeof(obj)
+    if isinstance(obj, dict):
+        size += sum(getObjectSizeInBytes(k) + getObjectSizeInBytes(v) for k, v in obj.items())
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+        size += sum(getObjectSizeInBytes(i) for i in obj)
+    return size
 
 def getFromSubgraph(apiKey: str, subgraphID: str, query: str) -> Dict[str, Any]:
     """
@@ -535,7 +565,64 @@ def getSizeInGB(fileLoc: str) -> float:
         fileLoc (str): The location for the file
     """
     return os.path.getsize(fileLoc) / (1024 * 1024 * 1024)
-        
+
+def sendTelegramMessage(
+    botToken: str,
+    chatID: Union[str, int],
+    message: str,
+    parseMode: Optional[str] = None,
+    disableWebPagePreview: bool = False,
+    disableNotification: bool = False
+) -> Dict[str, Any]:
+    """
+    Sends a message to a Telegram chat, group, or channel using a Telegram bot.
+    
+    Args:
+        botToken (str): The Telegram bot's API token (from @BotFather).
+        chatID (str | int): The target chat ID, or a channel username (e.g. "@mychannel").
+        message (str): The text of the message to send.
+        parseMode (str, optional): Formatting mode for the message body.
+            One of "MarkdownV2", "HTML", or "Markdown". Default is None (plain text).
+        disableWebPagePreview (bool): Whether to disable link previews in the message. Default False.
+        disableNotification (bool): Whether to send the message silently (no notification sound). Default False.
+ 
+    Returns:
+        Dict[str, Any]: The JSON response from the Telegram API. On failure, includes
+            "ok": False along with an "error" flag, "code", and "msg" describing the issue.
+    """
+    url = f"https://api.telegram.org/bot{botToken}/sendMessage"
+ 
+    payload = {
+        "chat_id": chatID,
+        "text": message,
+        "disable_web_page_preview": disableWebPagePreview,
+        "disable_notification": disableNotification,
+    }
+ 
+    if parseMode is not None:
+        payload["parse_mode"] = parseMode
+ 
+    try:
+        response = sendRequest_Sync(
+            url=url,
+            method="POST",
+            payload=payload
+        )
+        jsonResponse = response.json()
+ 
+        if not jsonResponse.get("ok", False):
+            print(f"Failed to send Telegram message: {jsonResponse.get('description', 'Unknown error')}")
+ 
+        return jsonResponse
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
+        return {
+            "ok": False,
+            "error": True,
+            "code": Errors.REQUEST_ERROR,
+            "msg": f"{e}"
+        }
+     
 class Errors(StrEnum):
     MISSING_API_KEY = "UNACCEPTABLE_API_KEY"
     WRONG_ARGUMENTS = "WRONG_ARGUMENTS"

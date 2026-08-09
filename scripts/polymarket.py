@@ -17,7 +17,7 @@ handler = PolymarketHandler(
 
 if   sys.argv[1] == "--getAllEvents":
     result = handler.getAllEvents(
-        saveFile = f"src/data/liveEvents_{int(datetime.now().timestamp())}.parquet", 
+        saveFile = f"src/data/polymarket/historical_markets/polymarket_liveEvents_{int(datetime.now().timestamp())}.parquet", 
         getMarkets = False,
         reqOptions = {
             # "liquidity_min": 10_000,
@@ -30,7 +30,7 @@ elif sys.argv[1] == "--getLiveMarkets":
         getPriceData = True
         
     result = handler.getAllMarkets(
-        saveFile = f"src/data/polymarket_liveMarkets_{int(datetime.now().timestamp())}.parquet", 
+        saveFile = f"src/data/polymarket/historical_markets/polymarket_liveMarkets_{int(datetime.now().timestamp())}.parquet", 
         getMarkets = True,
         getPriceData = getPriceData,
         reqOptions = {
@@ -183,10 +183,6 @@ elif sys.argv[1] == "--toCsv":
 elif sys.argv[1] == "--getAllTrades":
     _saveDirectory = "./src/data/polymarket/trades"
     
-    if not os.getenv("graphQLAPI_key", None):
-        print("please provide a Graph QL api key")
-        exit()
-    
     if not os.path.isdir(_saveDirectory):
         print("No prior data were found for polymarket trades, starting from scratch...")
         # TODO: Get polymarket v1 trades from hugging face
@@ -211,16 +207,69 @@ elif sys.argv[1] == "--getAllTrades":
         
         print(f"Starting to fetch from block number {blockNumber} to the latest block")
         if blockNumber is not None:
-            # # Start Fetching trades from this block until now
-            # handler.getAllTrades_Graph(_saveDirectory, os.getenv("graphQLAPI_key"), None, "latest")
+            # Start Fetching trades from this block until now
+            
+            # Customizations
+            stopAfter = int(sys.argv[sys.argv.index("--stop_after") + 1]) if "--stop_after" in sys.argv else None
+            
+            if os.getenv("telegramBotToken", None) and os.getenv("chatID"):
+                sendTelegramMessage(
+                    os.getenv("telegramBotToken"),
+                    os.getenv("chatID"),
+                    f"Command received"
+                )  
+
             handler.getAllTrades_RPC(
                 _saveDirectory,
                 fromBlock = blockNumber,
                 toBlock = "latest",
                 blockBatchSize = 400,
                 maxFileSize_GB = 0.1,
-                saveBlockRange = 6_000
+                saveBlockRange = 6_000,
+                stopAfter = stopAfter
             )
+elif sys.argv[1] == "--addPricesToMarketData":
+    # Adds price data to  previously acquired market data market data
+    if len(sys.argv) < 4:
+        print("Please provide the path to the market data file and the save location with flags --marketData, --saveLocation and --tradesLocation")
+        exit()
+    
+    saveLocation = None
+    if "--saveLocation" in sys.argv:
+        saveLocation = sys.argv[sys.argv.index("--saveLocation") + 1]
+        os.makedirs(saveLocation, exist_ok=True)
+    else:
+        print("Please provide the save location with flag --saveLocation")
+        exit()
+
+    marketDataPath = None
+    if "--marketData" in sys.argv:
+        marketDataPath = sys.argv[sys.argv.index("--marketData") + 1]
+        
+        if not os.path.exists(marketDataPath):
+            print("Market data file not found:", marketDataPath)
+            exit()
+    else:
+        print("Please provide the market data file path with flag --marketData")
+        exit()
+
+    tradesDir = None
+    if "--tradesLocation" in sys.argv:
+        tradesDir = sys.argv[sys.argv.index("--tradesLocation") + 1]
+    else:
+        print("Please provide the trades directory path with flag --tradesLocation")
+        exit()
+
+    # Customizations
+    stopAfter = int(sys.argv[sys.argv.index("--stop_after") + 1]) if "--stop_after" in sys.argv else None
+    
+    handler.addPricesToMarketData(
+        marketDataPath = marketDataPath,
+        tradesDataPath = tradesDir,
+        saveLocation = saveLocation,
+        stopAfter = stopAfter
+    )
+    
 # elif sys.argv[1] == "--getMarketPrices":
 #     # Gets prices for markets and saves them
 #     # Saves the data to ./src/data/polymarket/markets_with_price
