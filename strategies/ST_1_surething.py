@@ -50,8 +50,18 @@ for idx, market in allMarkets.iterrows():
     conditionID = market.conditionID
     
     # Get trades for the market
-    outcome_0_trades = queryParquetFolder("./src/data/polymarket/trades", f"SELECT * FROM data WHERE token_id = '{outcome_0_id}'")
-    outcome_1_trades = queryParquetFolder("./src/data/polymarket/trades", f"SELECT * FROM data WHERE token_id = '{outcome_1_id}'")
+    fullMarketData = queryParquetFolder("./src/data/polymarket/trades", f"SELECT * FROM data WHERE slug = '{slug}'").iloc[0]
+    
+    if not fullMarketData["has_price_history"]:
+        continue
+    
+    outcome_0_price = fullMarketData["outcome_0_history_price"]
+    outcome_0_price_ts = fullMarketData["outcome_0_history_price_ts"]
+    outcome_1_price = fullMarketData["outcome_1_history_price"]
+    outcome_1_price_ts = fullMarketData["outcome_1_history_price_ts"]
+    hasPriceHostory = fullMarketData["has_price_history"]
+    
+    
         
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), gridspec_kw={'height_ratios': [4, 1]}, sharex=True)
     ax1.plot(outcome_1_trades["block_timestamp"], outcome_1_trades["price"], label="Outcome 1 Price")
