@@ -150,6 +150,7 @@ def calculateMonotonicity(prob: pd.Series) -> float:
     Args:
         prob (pd.Series): A pandas Series representing the probability values over time.
     """
+    print(prob)
     prob = prob.dropna()
 
     if len(prob) < 2:
@@ -166,10 +167,15 @@ def calculateMonotonicity(prob: pd.Series) -> float:
 
     return positiveChanges / len(nonZeroChanges)
 
-def areaAroundThreshold(P: pd.Series, threshold: float = 0.9) -> tuple[float, float]:
+def areaAroundThreshold(P: pd.Series, timestamps: pd.Series | np.ndarray, threshold: float):
     """
     Compute the normalized area under a probability (or confidence) curve
-    P(t) and check whether it exceeds a given threshold.
+    P(t) and check whether it exceeds a given threshold. Note that area is
+    not the area between the curve and the threshold line. It's the area
+    under the curve itself.
+
+    Non-equidistant timestamps are supported explicitly via the `timestamps`
+    argument (trapezoidal integration handles uneven spacing correctly).
 
     This corresponds to:
         A = ∫ P(t) dt                  (area under the curve)
@@ -181,28 +187,44 @@ def areaAroundThreshold(P: pd.Series, threshold: float = 0.9) -> tuple[float, fl
     fluctuating or staying low for large portions of time.
 
     Args:
-        P (pd.Series): A pandas Series representing P(t)
+        P (pd.Series): A pandas Series representing P(t) values (no time
+            index required).
+        timestamps (pd.Series | np.ndarray): Timestamps corresponding to
+            each P value. Can be datetime64, pd.Timestamp, or numeric
+            (e.g. unix epoch seconds). Does not need to be equidistant.
         threshold (float):
             The normalized-area threshold used to determine whether the
             system has effectively spent almost its whole lifetime near
             certainty.
 
-    Returns (tuple):
-        totalTime (float): T = t[-1] - t[0], the total elapsed time span.
-        totalArea (float): A = ∫ P(t) dt over the full time span (trapezoidal 
+    Returns (dict):
+        totalTime (float): T = t[-1] - t[0], the total elapsed time span
+            (in seconds if timestamps are datetime-like).
+        totalArea (float): A = ∫ P(t) dt over the full time span (trapezoidal
             rule).
-        areaAbove (float): Absolute area contributed by time points where 
+        areaAbove (float): Absolute area contributed by time points where
             P(t) >= threshold.
-        areaBelow (float): Absolute area contributed by time points where 
+        areaBelow (float): Absolute area contributed by time points where
             P(t) < threshold.
-        relativeAreaAbove (float): areaAbove / totalTime — fraction of the 
+        relativeAreaAbove (float): areaAbove / totalTime — fraction of the
             average curve height coming from the "above threshold" region.
-        relativeAreaBelow (float): areaBelow / totalTime — fraction of the 
+        relativeAreaBelow (float): areaBelow / totalTime — fraction of the
             average curve height coming from the "below threshold" region.
     """
-    # Extract time (t) from the index and P(t) from the values
-    t = P.index.to_numpy(dtype=float)
     pValues = P.to_numpy(dtype=float)
+
+    # Normalize timestamps to a float array (seconds since first timestamp)
+    tsArray = pd.Series(timestamps).to_numpy()
+    if np.issubdtype(tsArray.dtype, np.datetime64):
+        t = (tsArray - tsArray[0]) / np.timedelta64(1, "s")
+        t = t.astype(float)
+    else:
+        t = tsArray.astype(float)
+
+    if len(t) != len(pValues):
+        raise ValueError(
+            f"timestamps length ({len(t)}) must match P length ({len(pValues)})"
+        )
 
     # T = total elapsed time span
     totalTime = t[-1] - t[0]
