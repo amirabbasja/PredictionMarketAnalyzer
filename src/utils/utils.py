@@ -462,14 +462,50 @@ def saveProgress(path: str, data: Dict[str, Any]) -> None:
     with open(saveFile, 'w', encoding='utf-8') as f:
         json.dump(file_data, f, indent=4)
 
+def getFileSize(path, binary=True, decimals=1):
+    """
+    Return a file's size as a human-readable string (e.g. "1.5 MiB").
+    Uses IEC binary units (1024) by default, or SI decimal units (1000).
+
+    Args:
+        path (str | Path): File path to inspect
+        binary (bool): True for KiB/MiB/GiB (1024), False for KB/MB/GB (1000)
+        decimals (int): Digits after the decimal for units larger than bytes
+
+    Returns:
+        A size string such as "12.3 MiB", or "0 B" if the file is empty
+    """
+    # Resolve the path and read the size in bytes from the filesystem.
+    sizeBytes = Path(path).stat().st_size
+
+    # Base and unit labels: IEC binary vs SI decimal.
+    base = 1024 if binary else 1000
+    units = (
+        ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+        if binary
+        else ("B", "KB", "MB", "GB", "TB", "PB")
+    )
+
+    # Scale down until the value fits in the next unit, or we hit the last label.
+    value = float(sizeBytes)
+    unitIndex = 0
+    while value >= base and unitIndex < len(units) - 1:
+        value /= base
+        unitIndex += 1
+
+    # Bytes stay as an integer; larger units use the requested precision.
+    if unitIndex == 0:
+        return f"{int(value)} {units[unitIndex]}"
+    return f"{value:.{decimals}f} {units[unitIndex]}"
+
 def loadABI(blockchain: str, contractName: str) -> Optional[Dict[str, Any]]:
     """
     Load the ABI for a given blockchain and contract name from the ABIs directory.
     The ABI files should have `.abi` extension
     
     Args:
-        blockchain: The name of the blockchain (e.g. "polygon")
-        contractName: The name of the contract (e.g. "exchange_CFT_v2", no extensions)
+        blockchain (str): The name of the blockchain (e.g. "polygon")
+        contractName (str): The name of the contract (e.g. "exchange_CFT_v2", no extensions)
     
     Returns:
         The ABI as a list of dictionaries, or None if not found

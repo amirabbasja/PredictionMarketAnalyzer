@@ -24,24 +24,25 @@ def maxDrawDown(probSeries: pd.Series, type: str) -> float:
     maxDrawdown = abs(drawdown).max()
     return maxDrawdown
 
-def drawDown(probSeries: pd.Series, type: str) -> pd.Series:
+def drawDown(probSeries: np.ndarray, type: str) -> np.ndarray:
     """
-    Calculate the drawdown series of a probability series.
+    Calculate the drawdown series of a probability array.
 
     Args:
-        probSeries (pd.Series): A pandas Series representing the probability values over time.
+        probSeries (np.ndarray): Probability values over time.
 
     Returns:
-        pd.Series: The drawdown values over time (as positive values).
+        np.ndarray: Drawdown values over time (as positive values).
     """
-    runningMax = probSeries.cummax()
+    runningMax = np.maximum.accumulate(probSeries)
     if type == 'absolute':
         drawdown = runningMax - probSeries
     elif type == 'relative':
         drawdown = (probSeries - runningMax) / runningMax
     else:
         raise ValueError("Invalid type. Choose 'absolute' or 'relative'.")
-    return drawdown.abs()
+    return np.abs(drawdown)
+
 
 def fractionOfTimeSpent(prices, datetimes, threshold):
     """
@@ -69,7 +70,7 @@ def fractionOfTimeSpent(prices, datetimes, threshold):
     
     totalSeconds = work['duration'].sum().total_seconds()
     if totalSeconds <= 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     
     aboveSeconds = work.loc[work['price'] >  threshold, 'duration'].sum().total_seconds()
     belowSeconds = work.loc[work['price'] <  threshold, 'duration'].sum().total_seconds()
@@ -137,7 +138,7 @@ def calculateVolatility(prob: pd.Series) -> float:
 
     return probabilityChanges.std()
 
-def calculateMonotonicity(prob: pd.Series) -> float:
+def calculateMonotonicity(prob: np.ndarray) -> float:
     """
     Computes the monotonicity of a probability trajectory.
 
@@ -146,28 +147,26 @@ def calculateMonotonicity(prob: pd.Series) -> float:
         1.0 -> strictly increasing
         0.5 -> equal upward/downward movements
         0.0 -> strictly decreasing
-    
+
     Args:
-        prob (pd.Series): A pandas Series representing the probability values over time.
+        prob (np.ndarray): Array of probability values over time.
     """
-    print(prob)
-    prob = prob.dropna()
+    prob = prob[~np.isnan(prob)]
 
     if len(prob) < 2:
         return 1.0
 
-    changes = prob.diff().dropna()
-
+    changes = np.diff(prob)
     nonZeroChanges = changes[changes != 0]
 
     if len(nonZeroChanges) == 0:
         return 1.0
 
-    positiveChanges = (nonZeroChanges > 0).sum()
+    positiveChanges = np.sum(nonZeroChanges > 0)
 
     return positiveChanges / len(nonZeroChanges)
 
-def areaAroundThreshold(P: pd.Series, timestamps: pd.Series | np.ndarray, threshold: float):
+def areaAroundThreshold(pValues: np.ndarray, timestamps: pd.Series | np.ndarray, threshold: float):
     """
     Compute the normalized area under a probability (or confidence) curve
     P(t) and check whether it exceeds a given threshold. Note that area is
@@ -187,7 +186,7 @@ def areaAroundThreshold(P: pd.Series, timestamps: pd.Series | np.ndarray, thresh
     fluctuating or staying low for large portions of time.
 
     Args:
-        P (pd.Series): A pandas Series representing P(t) values (no time
+        pValues (np.ndarray): Array of P(t) values (no time
             index required).
         timestamps (pd.Series | np.ndarray): Timestamps corresponding to
             each P value. Can be datetime64, pd.Timestamp, or numeric
@@ -211,8 +210,6 @@ def areaAroundThreshold(P: pd.Series, timestamps: pd.Series | np.ndarray, thresh
         relativeAreaBelow (float): areaBelow / totalTime — fraction of the
             average curve height coming from the "below threshold" region.
     """
-    pValues = P.to_numpy(dtype=float)
-
     # Normalize timestamps to a float array (seconds since first timestamp)
     tsArray = pd.Series(timestamps).to_numpy()
     if np.issubdtype(tsArray.dtype, np.datetime64):
@@ -243,8 +240,12 @@ def areaAroundThreshold(P: pd.Series, timestamps: pd.Series | np.ndarray, thresh
     areaBelow = np.trapz(pBelowOnly, t)
 
     # Normalize each region's area by the total time span
-    relativeAreaAbove = areaAbove / totalTime
-    relativeAreaBelow = areaBelow / totalTime
+    if totalTime > 0:
+        relativeAreaAbove = areaAbove / totalTime
+        relativeAreaBelow = areaBelow / totalTime
+    else:
+        relativeAreaAbove = 0.0
+        relativeAreaBelow = 0.0
 
     return {
         "totalTime": totalTime,
