@@ -58,52 +58,111 @@ IMPORTANT — separate fix needed in src/utils/math_utils.py:
 import os, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
 from src.utils.utils import queryParquetFile, appendToParquet
-from src.utils.math_utils import (
-    fractionOfTimeSpent,
-    timeToReachThreshold,
-    calculateMonotonicity,
-    areaAroundThreshold,
-    drawDown,
-)
+from src.utils.math_utils import calculateMonotonicity
 
 THRESHOLDS = [0.80, 0.90, 0.95, 0.975]
 
 
-def _priceAtRemainingTime(priceTs, fraction: float) -> int:
-    """
-    Index of the first timestamp past `fraction` of the market's total
-    time span. Equivalent to the original next(i for i, v in enumerate(...))
-    calls, just de-duplicated into one helper.
+def _timestampsAsFloat(timestamps) -> np.ndarray:
+    """Convert a sorted timestamp grid to the numeric scale used by metrics."""
+    timestampArray = np.asarray(timestamps)
+    if np.issubdtype(timestampArray.dtype, np.number):
+        return timestampArray.astype(np.float64, copy=False)
 
-    NOTE: if `priceTs` is guaranteed chronologically sorted (it likely is,
-    given how trades are fetched), this can be swapped for `bisect` /
-    `numpy.searchsorted` for an O(log n) lookup instead of O(n).
-    """
-    span = priceTs[-1] - priceTs[0]
-    target = priceTs[0] + span * fraction
-    for i, v in enumerate(priceTs):
-        if v > target:
-            return i
-    return len(priceTs) - 1
+    datetimeArray = pd.to_datetime(timestampArray).to_numpy()
+    return ((datetimeArray - datetimeArray[0]) / np.timedelta64(1, "s")).astype(
+        np.float64,
+        copy=False,
+    )
+
+
+def _prepareOutcomeHistory(prices, timestamps):
+    """Validate and sort one history, converting its timestamps only once."""
+    priceArray = np.asarray(prices, dtype=np.float64)
+    timestampArray = np.asarray(timestamps)
+    if len(priceArray) != len(timestampArray):
+        raise ValueError("Each outcome price history must match its timestamp history")
+
+    if np.issubdtype(timestampArray.dtype, np.number):
+        order = np.argsort(timestampArray, kind="stable")
+    else:
+        timestampArray = pd.to_datetime(timestampArray).to_numpy()
+        order = np.argsort(timestampArray, kind="stable")
+
+    sortedTimestamps = timestampArray[order]
+    return priceArray[order], _timestampsAsFloat(sortedTimestamps)
+
+
+def _outcomeMetricsFromSorted(price, priceTs) -> dict:
+    """Calculate every threshold metric from one prepared, sorted history."""
+    price = np.asarray(price, dtype=np.float64)
+    priceTs = np.asarray(priceTs, dtype=np.float64)
+    out = {}
+
+    totalTime = priceTs[-1] - priceTs[0]
+    durations = np.diff(priceTs)
+
+    # Point weights make dot(weights, values) equivalent to trapezoidal
+    # integration while letting us reuse the timestamp work at each threshold.
+    integrationWeights = np.zeros(len(price), dtype=np.float64)
+    if len(price) > 1:
+        integrationWeights[0] = durations[0] / 2.0
+        integrationWeights[-1] = durations[-1] / 2.0
+        if len(price) > 2:
+            integrationWeights[1:-1] = (durations[:-1] + durations[1:]) / 2.0
+    totalArea = np.dot(integrationWeights, price)
+
+    for th in THRESHOLDS:
+        if totalTime > 0:
+            intervalPrices = price[:-1]
+            above = durations[intervalPrices > th].sum() / totalTime
+            below = durations[intervalPrices < th].sum() / totalTime
+            equal = durations[intervalPrices == th].sum() / totalTime
+        else:
+            above = below = equal = 0.0
+
+        target = priceTs[0] + totalTime * th
+        remainingIndex = min(
+            int(np.searchsorted(priceTs, target, side="right")),
+            len(priceTs) - 1,
+        )
+
+        hitIndices = np.flatnonzero(price >= th)
+        if len(hitIndices) == 0:
+            timeToReach = -1
+        elif totalTime <= 0:
+            timeToReach = 0.0 if priceTs[hitIndices[0]] == priceTs[0] else -1
+        else:
+            timeToReach = (priceTs[hitIndices[0]] - priceTs[0]) / totalTime
+
+        aboveMask = price >= th
+        areaAbove = np.dot(integrationWeights, np.where(aboveMask, price, 0.0))
+        areaBelow = np.dot(integrationWeights, np.where(~aboveMask, price, 0.0))
+
+        out[f"fractionAbove_{th}"] = above
+        out[f"priceAtRemaining_{th}"] = remainingIndex
+        out[f"timeToReach_{th}"] = timeToReach
+        out[f"area_{th}"] = {
+            "totalTime": totalTime,
+            "totalArea": totalArea,
+            "areaAbove": areaAbove,
+            "areaBelow": areaBelow,
+            "relativeAreaAbove": areaAbove / totalTime if totalTime > 0 else 0.0,
+            "relativeAreaBelow": areaBelow / totalTime if totalTime > 0 else 0.0,
+        }
+
+    out["monotonicity"] = calculateMonotonicity(price)
+    return out
 
 
 def _outcomeMetrics(price, priceTs) -> dict:
-    priceSeries = pd.Series(price)
-    out = {}
-
-    for th in THRESHOLDS:
-        above, below, equal = fractionOfTimeSpent(priceSeries, priceTs, th)
-        out[f"fractionAbove_{th}"] = above
-        out[f"priceAtRemaining_{th}"] = _priceAtRemainingTime(priceTs, th)
-        out[f"timeToReach_{th}"] = timeToReachThreshold(priceSeries, priceTs, th)
-        out[f"area_{th}"] = areaAroundThreshold(priceSeries, priceTs, th)
-
-    out["monotonicity"] = calculateMonotonicity(priceSeries)
-    return out
+    sortedPrices, sortedTimestamps = _prepareOutcomeHistory(price, priceTs)
+    return _outcomeMetricsFromSorted(sortedPrices, sortedTimestamps)
 
 
 MARKETS_WITH_PRICE_COLUMNS = """
@@ -155,36 +214,35 @@ def _symmetrizeOutcomeHistories(
     outcome1Timestamps,
 ):
     """Build complementary binary-outcome prices on one timestamp grid."""
-    histories = (
-        (outcome0Prices, outcome0Timestamps, False),
-        (outcome1Prices, outcome1Timestamps, True),
+    outcome0Prices = np.asarray(outcome0Prices, dtype=np.float64)
+    outcome1Prices = np.asarray(outcome1Prices, dtype=np.float64)
+    outcome0Timestamps = np.asarray(outcome0Timestamps)
+    outcome1Timestamps = np.asarray(outcome1Timestamps)
+
+    if len(outcome0Prices) != len(outcome0Timestamps):
+        raise ValueError("Each outcome price history must match its timestamp history")
+    if len(outcome1Prices) != len(outcome1Timestamps):
+        raise ValueError("Each outcome price history must match its timestamp history")
+
+    allTimestamps = np.concatenate((outcome0Timestamps, outcome1Timestamps))
+    impliedOutcome0Prices = np.concatenate(
+        (outcome0Prices, 1.0 - outcome1Prices)
     )
-    impliedOutcome0ByTimestamp = {}
 
-    for prices, timestamps, isOutcome1 in histories:
-        if len(prices) != len(timestamps):
-            raise ValueError("Each outcome price history must match its timestamp history")
-
-        for price, timestamp in zip(prices, timestamps):
-            # A trade in outcome 1 at p implies that outcome 0 is worth 1 - p.
-            impliedOutcome0 = 1.0 - float(price) if isOutcome1 else float(price)
-            impliedOutcome0ByTimestamp.setdefault(timestamp, []).append(impliedOutcome0)
-
-    symmetricTimestamps = sorted(impliedOutcome0ByTimestamp)
-    symmetricOutcome0Prices = [
-        sum(impliedOutcome0ByTimestamp[timestamp])
-        / len(impliedOutcome0ByTimestamp[timestamp])
-        for timestamp in symmetricTimestamps
-    ]
-    symmetricOutcome1Prices = [
-        1.0 - price for price in symmetricOutcome0Prices
-    ]
+    symmetricTimestamps, timestampGroups = np.unique(
+        allTimestamps,
+        return_inverse=True,
+    )
+    priceSums = np.bincount(timestampGroups, weights=impliedOutcome0Prices)
+    priceCounts = np.bincount(timestampGroups)
+    symmetricOutcome0Prices = priceSums / priceCounts
+    symmetricOutcome1Prices = 1.0 - symmetricOutcome0Prices
 
     return (
         symmetricOutcome0Prices,
         symmetricTimestamps,
         symmetricOutcome1Prices,
-        symmetricTimestamps.copy(),
+        symmetricTimestamps,
     )
 
 
@@ -227,24 +285,39 @@ def processMarket(row: dict, makeOutcomePricesSymmetric: bool = True):
     outcome1Prices = row["outcome_1_history_price"]
     outcome1Timestamps = row["outcome_1_history_price_ts"]
 
-    # if makeOutcomePricesSymmetric:
-    #     (
-    #         outcome0Prices,
-    #         outcome0Timestamps,
-    #         outcome1Prices,
-    #         outcome1Timestamps,
-    #     ) = _symmetrizeOutcomeHistories(
-    #         outcome0Prices,
-    #         outcome0Timestamps,
-    #         outcome1Prices,
-    #         outcome1Timestamps,
-    #     )
+    if makeOutcomePricesSymmetric:
+        (
+            outcome0Prices,
+            outcome0Timestamps,
+            outcome1Prices,
+            outcome1Timestamps,
+        ) = _symmetrizeOutcomeHistories(
+            outcome0Prices,
+            outcome0Timestamps,
+            outcome1Prices,
+            outcome1Timestamps,
+        )
+
+        # np.unique already returned a sorted shared grid, so prepare it once
+        # and reuse it for both complementary outcomes.
+        metricTimestamps = _timestampsAsFloat(outcome0Timestamps)
+        outcome0Metrics = _outcomeMetricsFromSorted(
+            outcome0Prices,
+            metricTimestamps,
+        )
+        outcome1Metrics = _outcomeMetricsFromSorted(
+            outcome1Prices,
+            metricTimestamps,
+        )
+    else:
+        outcome0Metrics = _outcomeMetrics(outcome0Prices, outcome0Timestamps)
+        outcome1Metrics = _outcomeMetrics(outcome1Prices, outcome1Timestamps)
 
     return {
         "slug": row["slug"],
         "conditionID": row["conditionID"],
-        "outcome_0": _outcomeMetrics(outcome0Prices, outcome0Timestamps),
-        "outcome_1": _outcomeMetrics(outcome1Prices, outcome1Timestamps),
+        "outcome_0": outcome0Metrics,
+        "outcome_1": outcome1Metrics,
     }
 
 os.system('cls' if os.name == 'nt' else 'clear')
