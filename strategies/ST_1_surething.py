@@ -55,7 +55,7 @@ IMPORTANT — separate fix needed in src/utils/math_utils.py:
           ...
 """
 
-import os
+import os, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -148,22 +148,103 @@ def _isEmpty(x) -> bool:
     return len(x) == 0
 
 
-def processMarket(row: dict):
+def _symmetrizeOutcomeHistories(
+    outcome0Prices,
+    outcome0Timestamps,
+    outcome1Prices,
+    outcome1Timestamps,
+):
+    """Build complementary binary-outcome prices on one timestamp grid."""
+    histories = (
+        (outcome0Prices, outcome0Timestamps, False),
+        (outcome1Prices, outcome1Timestamps, True),
+    )
+    impliedOutcome0ByTimestamp = {}
+
+    for prices, timestamps, isOutcome1 in histories:
+        if len(prices) != len(timestamps):
+            raise ValueError("Each outcome price history must match its timestamp history")
+
+        for price, timestamp in zip(prices, timestamps):
+            # A trade in outcome 1 at p implies that outcome 0 is worth 1 - p.
+            impliedOutcome0 = 1.0 - float(price) if isOutcome1 else float(price)
+            impliedOutcome0ByTimestamp.setdefault(timestamp, []).append(impliedOutcome0)
+
+    symmetricTimestamps = sorted(impliedOutcome0ByTimestamp)
+    symmetricOutcome0Prices = [
+        sum(impliedOutcome0ByTimestamp[timestamp])
+        / len(impliedOutcome0ByTimestamp[timestamp])
+        for timestamp in symmetricTimestamps
+    ]
+    symmetricOutcome1Prices = [
+        1.0 - price for price in symmetricOutcome0Prices
+    ]
+
+    return (
+        symmetricOutcome0Prices,
+        symmetricTimestamps,
+        symmetricOutcome1Prices,
+        symmetricTimestamps.copy(),
+    )
+
+
+def processMarket(row: dict, makeOutcomePricesSymmetric: bool = True):
     """
     Pure, in-memory, single-market computation. No disk I/O here, which is
     what makes this safe (and worthwhile) to fan out across worker
     threads.
+
+    Polymarket binary outcomes are complementary, so their prices should sum
+    to 1 at any timestamp. The stored histories are built from trades in each
+    outcome token independently, however, which gives the two outcomes
+    different timestamp grids and can make their recorded prices appear
+    non-complementary.
+
+    When ``makeOutcomePricesSymmetric`` is True (the default), every observed
+    trade is converted to a complete binary-market observation: an outcome-0
+    trade at price ``p`` becomes ``(p, 1 - p)``, while an outcome-1 trade at
+    price ``p`` becomes ``(1 - p, p)``. Both histories then use the sorted
+    union of their timestamps and sum to exactly 1 at every position. If
+    multiple trades have the same timestamp, their implied outcome-0 prices
+    are averaged before the complementary outcome-1 price is calculated.
+    Pass False to compute the metrics from the original independent trade
+    histories instead.
+
+    Args:
+        row (dict): A market record containing both outcomes' price and
+            timestamp histories.
+        makeOutcomePricesSymmetric (bool): Whether to reconstruct both price
+            histories as complementary observations on a shared timestamp
+            grid. Defaults to True.
     """
     if not row.get("has_price_history"):
         return None
     if _isEmpty(row["outcome_0_history_price"]) or _isEmpty(row["outcome_1_history_price"]):
         return None
 
+    outcome0Prices = row["outcome_0_history_price"]
+    outcome0Timestamps = row["outcome_0_history_price_ts"]
+    outcome1Prices = row["outcome_1_history_price"]
+    outcome1Timestamps = row["outcome_1_history_price_ts"]
+
+    # if makeOutcomePricesSymmetric:
+    #     (
+    #         outcome0Prices,
+    #         outcome0Timestamps,
+    #         outcome1Prices,
+    #         outcome1Timestamps,
+    #     ) = _symmetrizeOutcomeHistories(
+    #         outcome0Prices,
+    #         outcome0Timestamps,
+    #         outcome1Prices,
+    #         outcome1Timestamps,
+    #     )
+
     return {
         "slug": row["slug"],
         "conditionID": row["conditionID"],
-        "outcome_0": _outcomeMetrics(row["outcome_0_history_price"], row["outcome_0_history_price_ts"]),
-        "outcome_1": _outcomeMetrics(row["outcome_1_history_price"], row["outcome_1_history_price_ts"]),
+        "outcome_0": _outcomeMetrics(outcome0Prices, outcome0Timestamps),
+        "outcome_1": _outcomeMetrics(outcome1Prices, outcome1Timestamps),
     }
 
 os.system('cls' if os.name == 'nt' else 'clear')
@@ -182,8 +263,14 @@ totalResults = 0
 # here without paying to pickle each market's price-history lists
 # across process boundaries — and without worker stdout being piped
 # back through the parent, which is its own source of stalls.
+startTime = time.time()
 with ThreadPoolExecutor() as executor:
     for fileName, batchDf in iterMarketBatches(dataDir):
+
+        # Kill the process after 3.5 hours of activity - to abide by the HPC's rules for free plans
+        if 12600 < time.time() - startTime:
+            exit()
+
         if batchDf.empty:
             continue
 
