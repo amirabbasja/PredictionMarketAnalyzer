@@ -79,8 +79,12 @@ class PolymarketHandler:
         self.exchange_NEGRISK_v2_OrderFilled_topic0 = self.exchange_CFT_v2_OrderFilled_topic0
         
         # Polymarket contracts
-        self.contract_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_CFT_v2, abi = loadABI("polygon", "polymarket_exchange_CFT_v2"))
-        self.contract_Neg_Risk_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_NegRiskCFT_v2, abi = loadABI("polygon", "polymarket_exchange_neg_risk_CFT"))
+        if self.w3 is not None:
+            self.contract_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_CFT_v2, abi = loadABI("polygon", "polymarket_exchange_CFT_v2"))
+            self.contract_Neg_Risk_CFT_exchange_v2 = self.w3["polygon"].eth.contract(address = self.exchange_NegRiskCFT_v2, abi = loadABI("polygon", "polymarket_exchange_neg_risk_CFT"))
+        else:
+            self.contract_CFT_exchange_v2 = None
+            self.contract_Neg_Risk_CFT_exchange_v2 = None
         
         # Necessary data for decoding polymarket logs
         self.CTF_V1_DATA_TYPES     = ["uint256", "uint256", "uint256", "uint256", "uint256"]
@@ -776,6 +780,72 @@ class PolymarketHandler:
                 return (data["next_cursor"], lineCount)
         
         return ("", 0)  # Return empty string if no cursor is found
+
+    def getAllActiveMarkets(
+            self, 
+            limit: int = 100, 
+            minLiquidity: float = 100, 
+            verbose: bool = False
+            ,**params
+        ) -> pd.DataFrame:
+        """
+        Return all currently active Polymarket markets as a dataframe.
+
+        The Gamma API uses keyset pagination. Each response's ``next_cursor`` is
+        passed back as ``after_cursor`` until there are no more pages. Additional
+        Gamma market query parameters can be supplied through ``params``.
+
+        Args:
+            limit (int): Number of markets requested per page. Must be positive.
+            minLiquidity (float): Minimum liquidity required for markets. Default is 100.
+            verbose (bool): Whether to print progress information. Default is False.
+            **params: Additional query parameters acceptedby polyamrket
+
+        Returns:
+            A dataframe containing the market objects returned by Polymarket.
+        """
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+
+        requestParams = {
+            "limit": limit,
+            "closed": False,
+            "liquidity_num_min": minLiquidity,
+            **params,
+        }
+        markets = []
+        seenCursors = set()
+
+        while True:
+            response = sendRequest_Sync(
+                url=urljoin(self.baseURL_Gamma, "/markets/keyset"),
+                method="GET",
+                params=dict(requestParams),
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            if not isinstance(payload, dict):
+                raise ValueError("Polymarket returned an invalid markets response")
+
+            page = payload.get("markets", [])
+            if not isinstance(page, list):
+                raise ValueError("Polymarket returned an invalid markets list")
+            markets.extend(page)
+
+            nextCursor = payload.get("next_cursor")
+            if not nextCursor:
+                break
+            if nextCursor in seenCursors:
+                raise RuntimeError("Polymarket returned a repeated pagination cursor")
+
+            seenCursors.add(nextCursor)
+            requestParams["after_cursor"] = nextCursor
+            
+            if verbose:
+                print(len(markets), "markets fetched so far...")
+
+        return pd.DataFrame.from_records(markets)
     
     def getAllMarkets(
         self, 

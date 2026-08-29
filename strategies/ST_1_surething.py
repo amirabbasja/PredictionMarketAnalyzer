@@ -1,61 +1,22 @@
 """
-Optimized version of strategies/ST_1_surething.py
+SureThing Strategy
 
-Key changes vs the original:
+Pass necessary flags to run the script. The script can be run in two modes:
+1. Backtest Mode: This mode computes metrics for all markets in the Polymarket dataset
+   that have price history. It reads the data from the local Parquet files and saves
+   the computed metrics to a new Parquet file. To run in backtest mode, use the following command:
+   ```python
+   python ST_1_surething.py --backtest
+   ```
 
-  1. Fixed the inverted `continue` condition:
-        if fullMarketData.empty or not fullMarketData.shape[0] == 0:
-     This is always True (empty OR not-empty covers every case), so the
-     original loop skipped every market before computing anything.
-
-  2. Removed the N+1 disk-read. The original re-scanned the ENTIRE
-     `markets_with_price` parquet folder (fresh duckdb connection + glob +
-     filter) once per market, inside the loop. That's the single biggest
-     cost by far.
-
-     Instead of replacing it with one giant up-front query (which would
-     load every market's full price history into memory simultaneously —
-     exactly what MAX_FILE_SIZE_MB elsewhere in this codebase is designed
-     to avoid), this version reads the `markets_with_price` folder one
-     part-file at a time via `iterMarketBatches()`. Each file is scanned
-     exactly once, processed, and its results flushed to disk before the
-     next file is read — so memory stays bounded to a single part-file's
-     size regardless of how many markets exist in total.
-
-  3. Replaced `iterrows()` (slow — builds a Series per row) with
-     `to_dict("records")`.
-
-  4. Removed the duplicated `areaAroundThreshold(..., 0.80)` call that
-     was computed twice per outcome for no reason.
-
-  5. Parallelized the per-market metric computation with a thread pool.
-     Threads (not processes) because the underlying math is pandas/numpy,
-     which releases the GIL for most of the real work — this gets real
-     parallelism without pickling each market's price-history lists across
-     process boundaries. It also sidesteps a nasty failure mode: if
-     `calculateMonotonicity`'s stray `print(prob)` (see below) is still in
-     place, running it in worker *processes* means every print has to be
-     piped back through the parent's stdout — with enough workers printing
-     large series concurrently, that pipe can back up and the whole run
-     appears to hang at 0%. Removing the print is still the real fix either
-     way.
-
-  6. Results are now actually collected and saved to disk, instead of
-     being computed and discarded on the next loop iteration.
-
-IMPORTANT — separate fix needed in src/utils/math_utils.py:
-  `calculateMonotonicity()` currently has a leftover `print(prob)` debug
-  line that dumps the *entire* price series to stdout on every call.
-  With thousands of markets x 2 outcomes, that alone can dominate your
-  runtime (terminal I/O is very slow). Delete that line:
-
-      def calculateMonotonicity(prob: pd.Series) -> float:
-          print(prob)          # <-- delete this
-          prob = prob.dropna()
-          ...
+2. Run Mode: This mode fetches all currently active markets from Polymarket using the API.
+   Run with --v or --verbose to see progress information. To run in run mode, use the following command:
+   ```python
+   python ST_1_surething.py --run
+   ```
 """
 
-import os, time
+import os, time, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -64,6 +25,11 @@ from tqdm import tqdm
 
 from src.utils.utils import queryParquetFile, appendToParquet
 from src.utils.math_utils import calculateMonotonicity
+from src.handlers.polymarket import PolymarketHandler
+
+from datetime import datetime, timedelta, timezone
+
+args = sys.argv
 
 THRESHOLDS = [0.80, 0.90, 0.95, 0.975]
 
@@ -74,7 +40,9 @@ def _timestampsAsFloat(timestamps) -> np.ndarray:
     if np.issubdtype(timestampArray.dtype, np.number):
         return timestampArray.astype(np.float64, copy=False)
 
-    datetimeArray = pd.to_datetime(timestampArray).to_numpy()
+    datetimeArray = pd.to_datetime(
+        timestampArray, format="ISO8601", utc=True
+    ).to_numpy(dtype="datetime64[ns]")
     return ((datetimeArray - datetimeArray[0]) / np.timedelta64(1, "s")).astype(
         np.float64,
         copy=False,
@@ -91,7 +59,9 @@ def _prepareOutcomeHistory(prices, timestamps):
     if np.issubdtype(timestampArray.dtype, np.number):
         order = np.argsort(timestampArray, kind="stable")
     else:
-        timestampArray = pd.to_datetime(timestampArray).to_numpy()
+        timestampArray = pd.to_datetime(
+            timestampArray, format="ISO8601", utc=True
+        ).to_numpy(dtype="datetime64[ns]")
         order = np.argsort(timestampArray, kind="stable")
 
     sortedTimestamps = timestampArray[order]
@@ -127,10 +97,7 @@ def _outcomeMetricsFromSorted(price, priceTs) -> dict:
             above = below = equal = 0.0
 
         target = priceTs[0] + totalTime * th
-        remainingIndex = min(
-            int(np.searchsorted(priceTs, target, side="right")),
-            len(priceTs) - 1,
-        )
+        remainingIndex = min(int(np.searchsorted(priceTs, target, side="right")),len(priceTs) - 1,)
 
         hitIndices = np.flatnonzero(price >= th)
         if len(hitIndices) == 0:
@@ -163,15 +130,6 @@ def _outcomeMetricsFromSorted(price, priceTs) -> dict:
 def _outcomeMetrics(price, priceTs) -> dict:
     sortedPrices, sortedTimestamps = _prepareOutcomeHistory(price, priceTs)
     return _outcomeMetricsFromSorted(sortedPrices, sortedTimestamps)
-
-
-MARKETS_WITH_PRICE_COLUMNS = """
-    slug, conditionID, startDate, endDate,
-    outcome_0_ID, outcome_1_ID,
-    outcome_0_history_price, outcome_0_history_price_ts,
-    outcome_1_history_price, outcome_1_history_price_ts,
-    has_price_history
-"""
 
 
 def iterMarketBatches(dataDir: str):
@@ -320,59 +278,107 @@ def processMarket(row: dict, makeOutcomePricesSymmetric: bool = True):
         "outcome_1": outcome1Metrics,
     }
 
-os.system('cls' if os.name == 'nt' else 'clear')
 
-dataDir = "src/data/polymarket/markets_with_price"
-outPath = "src/data/strategyFiles/surething_metrics.parquet"
-os.makedirs(os.path.dirname(outPath), exist_ok=True)
+MARKETS_WITH_PRICE_COLUMNS = """
+    slug, conditionID, startDate, endDate,
+    outcome_0_ID, outcome_1_ID,
+    outcome_0_history_price, outcome_0_history_price_ts,
+    outcome_1_history_price, outcome_1_history_price_ts,
+    has_price_history
+"""
 
-totalMarkets = 0
-totalResults = 0
+# Print what is happening to user
+verbose = "--verbose" in args or "-v" in args
 
-# Threads, not processes: the math here (fractionOfTimeSpent,
-# timeToReachThreshold, areaAroundThreshold, drawDown,
-# calculateMonotonicity) is pandas/numpy under the hood and releases
-# the GIL for most of the actual work, so threads give real parallelism
-# here without paying to pickle each market's price-history lists
-# across process boundaries — and without worker stdout being piped
-# back through the parent, which is its own source of stalls.
-startTime = time.time()
-with ThreadPoolExecutor() as executor:
-    for fileName, batchDf in iterMarketBatches(dataDir):
 
-        # Kill the process after 3.5 hours of activity - to abide by the HPC's rules for free plans
-        if 12600 < time.time() - startTime:
-            exit()
+if "--backtest" in args:
+    os.system('cls' if os.name == 'nt' else 'clear')
+    dataDir = "src/data/polymarket/markets_with_price"
+    outPath = "src/data/strategyFiles/surething_metrics.parquet"
+    os.makedirs(os.path.dirname(outPath), exist_ok=True)
 
-        if batchDf.empty:
-            continue
+    totalMarkets = 0
+    totalResults = 0
 
-        batchDf["startDate"] = pd.to_datetime(batchDf["startDate"])
-        batchDf["endDate"] = pd.to_datetime(batchDf["endDate"])
-        records = batchDf.to_dict("records")
-        totalMarkets += len(records)
+    # Threads, not processes: the math here (fractionOfTimeSpent,
+    # timeToReachThreshold, areaAroundThreshold, drawDown,
+    # calculateMonotonicity) is pandas/numpy under the hood and releases
+    # the GIL for most of the actual work, so threads give real parallelism
+    # here without paying to pickle each market's price-history lists
+    # across process boundaries — and without worker stdout being piped
+    # back through the parent, which is its own source of stalls.
+    startTime = time.time()
+    with ThreadPoolExecutor() as executor:
+        for fileName, batchDf in iterMarketBatches(dataDir):
 
-        # Only this file's records are in flight at once — the next
-        # file isn't read until this batch's results are flushed and
-        # discarded below, which is what actually bounds memory.
-        batchResults = []
-        futures = {executor.submit(processMarket, r): r["slug"] for r in records}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc=f"Processing {fileName}"):
-            res = fut.result()
-            if res is not None:
-                batchResults.append(res)
+            # Kill the process after 3.5 hours of activity - to abide by the HPC's rules for free plans
+            if 12600 < time.time() - startTime:
+                exit()
 
-        if batchResults:
-            batchOut = pd.json_normalize(batchResults)
-            if not os.path.exists(outPath):
-                batchOut.to_parquet(outPath, index=False)
-            else:
-                appendToParquet(outPath, batchOut.to_dict("records"), safe=True)
-            totalResults += len(batchResults)
+            if batchDf.empty:
+                continue
 
-        # Explicitly drop references before moving to the next file.
-        del batchDf, records, batchResults
+            batchDf["startDate"] = pd.to_datetime(
+                batchDf["startDate"], format="ISO8601", utc=True
+            )
+            batchDf["endDate"] = pd.to_datetime(
+                batchDf["endDate"], format="ISO8601", utc=True
+            )
+            records = batchDf.to_dict("records")
+            totalMarkets += len(records)
 
-        print(f"[{fileName}] running total: {totalResults:,} markets with metrics / {totalMarkets:,} scanned")
+            # Only this file's records are in flight at once — the next
+            # file isn't read until this batch's results are flushed and
+            # discarded below, which is what actually bounds memory.
+            batchResults = []
+            futures = {executor.submit(processMarket, r): r["slug"] for r in records}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc=f"Processing {fileName}"):
+                res = fut.result()
+                if res is not None:
+                    batchResults.append(res)
 
-print(f"Done. Computed metrics for {totalResults:,} / {totalMarkets:,} markets. Saved to {outPath}")
+            if batchResults:
+                batchOut = pd.json_normalize(batchResults)
+                if not os.path.exists(outPath):
+                    batchOut.to_parquet(outPath, index=False)
+                else:
+                    appendToParquet(outPath, batchOut.to_dict("records"), safe=True)
+                totalResults += len(batchResults)
+
+            # Explicitly drop references before moving to the next file.
+            del batchDf, records, batchResults
+
+            print(f"[{fileName}] running total: {totalResults:,} markets with metrics / {totalMarkets:,} scanned")
+
+    print(f"Done. Computed metrics for {totalResults:,} / {totalMarkets:,} markets. Saved to {outPath}")
+elif "--run" in args:
+    # Handler
+    polymarketHandler = PolymarketHandler(
+        polymarketAPIkey = os.getenv("polymarketAPI_key"),
+        web3APIkey = os.getenv("alchemyAPI_key"),
+        provider = "alchemy"
+    )
+    
+    # Get a list of all online markets in polymarket
+    activeMarkets = polymarketHandler.getAllActiveMarkets(minLiquidity=1_000_000, verbose = verbose)
+    activeMarkets.to_csv("src/data/strategyFiles/polymarketActiveMarkets.csv", index=False)
+    
+    # Anlyze the markets and filter them
+    filteredDf = activeMarkets[["id", "conditionId", "questionID", "slug", "endDate", "startDate",
+                                "outcomePrices", "volume", "makerBaseFee", "takerBaseFee", "spread",
+                                "bestBid", "bestAsk"]].copy()
+    filteredDf["startDate_ts"] = pd.to_datetime(filteredDf["startDate"], format="ISO8601", utc=True).astype(int) / 10**9
+    filteredDf["endDate_ts"] = pd.to_datetime(filteredDf["endDate"], format="ISO8601", utc=True).astype(int) / 10**9
+    filteredDf["timeToEnd"] = filteredDf["endDate_ts"] - time.time()
+    filteredDf["duration"] = filteredDf["endDate_ts"] - filteredDf["startDate_ts"]
+    filteredDf["remainingTimeFraction"] = filteredDf["timeToEnd"] / filteredDf["duration"]
+    
+    
+    
+    print(activeMarkets.columns)
+    print(activeMarkets.iloc[0].endDate)
+    filteredDf.head()
+    
+    print(f"Found {len(activeMarkets)} active markets in Polymarket.")
+else:
+    print("This script is not meant to be run directly. Please pass an acceptable flag.")
