@@ -16,7 +16,7 @@ Pass necessary flags to run the script. The script can be run in two modes:
    ```
 """
 
-import os, time, sys
+import os, time, sys, pprint, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -360,24 +360,27 @@ elif "--run" in args:
     )
     
     # Get a list of all online markets in polymarket
-    activeMarkets = polymarketHandler.getAllActiveMarkets(minLiquidity=1_000_000, verbose = verbose)
-    activeMarkets.to_csv("src/data/strategyFiles/polymarketActiveMarkets.csv", index=False)
+    activeMarkets = polymarketHandler.getAllActiveMarkets(minLiquidity=500_000, verbose = verbose)
     
-    # Anlyze the markets and filter them
+    # Analyze the markets and filter them
     filteredDf = activeMarkets[["id", "conditionId", "questionID", "slug", "endDate", "startDate",
                                 "outcomePrices", "volume", "makerBaseFee", "takerBaseFee", "spread",
-                                "bestBid", "bestAsk"]].copy()
+                                "outcomes"]].copy()
     filteredDf["startDate_ts"] = pd.to_datetime(filteredDf["startDate"], format="ISO8601", utc=True).astype(int) / 10**9
     filteredDf["endDate_ts"] = pd.to_datetime(filteredDf["endDate"], format="ISO8601", utc=True).astype(int) / 10**9
     filteredDf["timeToEnd"] = filteredDf["endDate_ts"] - time.time()
     filteredDf["duration"] = filteredDf["endDate_ts"] - filteredDf["startDate_ts"]
     filteredDf["remainingTimeFraction"] = filteredDf["timeToEnd"] / filteredDf["duration"]
+    filteredDf["eventSlug"] = activeMarkets["events"].apply(lambda items: ",".join(d["slug"] for d in items) if isinstance(items, list) else "")
+    for col in ["outcomes", "outcomePrices"]:
+        filteredDf[col] = filteredDf[col].apply(lambda x: json.loads(x) if isinstance(x, str) else x)
+    filteredDf = filteredDf.explode(["outcomes", "outcomePrices"], ignore_index=True)
+    filteredDf.rename(columns={"outcomes": "outcome", "outcomePrices": "outcomePrice"}, inplace=True)
+    filteredDf["link"] = "http://polymarket.com/market/" + filteredDf["slug"]
+    filteredDf.sort_values(by = "outcomePrice", ascending = False, inplace = True)
+    filteredDf.to_csv("src/data/strategyFiles/polymarketActiveMarkets.csv", index=False)
     
-    
-    
-    print(activeMarkets.columns)
-    print(activeMarkets.iloc[0].endDate)
-    filteredDf.head()
+    # Filter for near certain markets (SureThing strategy)
     
     print(f"Found {len(activeMarkets)} active markets in Polymarket.")
 else:
