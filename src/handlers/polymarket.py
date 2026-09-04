@@ -811,10 +811,12 @@ class PolymarketHandler:
             "limit": limit,
             "closed": False,
             "liquidity_num_min": minLiquidity,
+            "include_tag": True,
             **params,
         }
         markets = []
         seenCursors = set()
+        startTime = time.time()
 
         while True:
             response = sendRequest_Sync(
@@ -833,6 +835,9 @@ class PolymarketHandler:
                 raise ValueError("Polymarket returned an invalid markets list")
             markets.extend(page)
 
+            if verbose:
+                print(f"\rMarkets acquired: {len(markets):,} (Active for {time.time() - startTime:.2f}s)", end="", flush=True)
+
             nextCursor = payload.get("next_cursor")
             if not nextCursor:
                 break
@@ -841,9 +846,9 @@ class PolymarketHandler:
 
             seenCursors.add(nextCursor)
             requestParams["after_cursor"] = nextCursor
-            
-            if verbose:
-                print(len(markets), "markets fetched so far...")
+
+        if verbose:
+            print()
 
         return pd.DataFrame.from_records(markets)
     
